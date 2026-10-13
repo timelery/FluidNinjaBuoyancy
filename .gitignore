@@ -1,0 +1,21 @@
+# Build output (UnrealBuildTool and the editor make these)
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Packaged releases: attach these to a GitHub Release instead of committing them
+Releases/
+
+# IDE and OS files
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+Thumbs.db
+.DS_Store

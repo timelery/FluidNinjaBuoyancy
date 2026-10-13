@@ -1,0 +1,10 @@
+# Text files are normalized in the repository and checked out with the platform's line endings.
+* text=auto
+
+# Unreal assets and other binaries are never diffed or merged as text.
+*.uasset binary
+*.umap binary
+*.png binary
+*.dll binary
+*.pdb binary
+*.zip binary

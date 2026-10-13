@@ -1,0 +1,87 @@
+// FluidNinja Buoyancy: the water under every floating body, resampled in one pass onto that body's own grid (i along +X, j along +Y).
+// Height from the Surface Mirror (an orthographic depth capture of the drawn water); current and density from FluidNinja's
+// velocity buffer. Dispatched from FluidNinjaBuoyancyGather.cpp; read back once a frame for all bodies.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float> HeightTexture;
+Texture2D<float4> FlowTexture;
+// Per body, three: (height column, row, step, grid points across), (flow column, row, step, flow on), (first sample, -, -, -).
+StructuredBuffer<float4> Slots;
+RWStructuredBuffer<float4> Samples;      // per point: (height or NoWater, flow u, flow v, density)
+int2 HeightSize;
+int2 FlowSize;
+int NumSlots;
+float CaptureTop;
+float CaptureFar;
+int HasFlow;
+
+static const float NoWater = -1.0e30;
+
+// Bilinear over the drawn texels only (depth inside (0, CaptureFar)): a bank or rock beside the water does not drag the height down.
+float SampleHeight(float2 T)
+{
+	const int2 P0 = int2(floor(T));
+	const float2 F = T - float2(P0);
+	float Weight = 0.0;
+	float Sum = 0.0;
+	[unroll]
+	for (int K = 0; K < 4; ++K)
+	{
+		const int2 O = int2(K & 1, K >> 1);
+		const int2 P = clamp(P0 + O, int2(0, 0), HeightSize - 1);
+		const float Depth = HeightTexture.Load(int3(P, 0));
+		const float W = (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y);
+		if (Depth > 0.0 && Depth < CaptureFar)
+		{
+			Weight += W;
+			Sum += (CaptureTop - Depth) * W;
+		}
+	}
+	return Weight > 0.3 ? Sum / Weight : NoWater;
+}
+
+float4 SampleFlow(float2 T)
+{
+	const int2 P0 = int2(floor(T));
+	const float2 F = T - float2(P0);
+	float4 Sum = 0.0;
+	[unroll]
+	for (int K = 0; K < 4; ++K)
+	{
+		const int2 O = int2(K & 1, K >> 1);
+		const int2 P = clamp(P0 + O, int2(0, 0), FlowSize - 1);
+		const float W = (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y);
+		Sum += FlowTexture.Load(int3(P, 0)) * W;
+	}
+	return Sum;
+}
+
+[numthreads(8, 8, 1)]
+void GatherCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int Slot = int(Id.z);
+	if (Slot >= NumSlots)
+	{
+		return;
+	}
+	const float4 A = Slots[Slot * 3];
+	const float4 B = Slots[Slot * 3 + 1];
+	const float4 C = Slots[Slot * 3 + 2];
+	const int Grid = int(A.w);
+	const int I = int(Id.x);
+	const int J = int(Id.y);
+	if (I >= Grid || J >= Grid)
+	{
+		return;
+	}
+	// Capture texels: column along +Y, row along -X (looking straight down). Velocity texels: column along +X, row along +Y.
+	const float Height = SampleHeight(float2(A.x + J * A.z, A.y - I * A.z));
+	float4 Flow = 0.0;
+	const float2 T = float2(B.x + I * B.z, B.y + J * B.z);
+	if (HasFlow != 0 && B.w > 0.5 && all(T >= -0.5) && all(T <= float2(FlowSize) - 0.5))
+	{
+		Flow = SampleFlow(T);
+	}
+	Samples[int(C.x) + J * Grid + I] = float4(Height, Flow.x, Flow.y, Flow.z);
+}
