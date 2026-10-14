@@ -105,4 +105,13 @@ Content/Effects                    NS_FNB_HullSplash (spray)
 Content/Audio                      SA_FNB_Hull (hull sound attenuation; no sounds ship)
 Content/Demo                       demo meshes, materials, Blueprints, the UE5 mannequin and the FNB_DemoPool level
 Docs/UserGuide.md
+LICENSE
 ```
+
+## License
+
+FluidNinja Buoyancy is released under the [MIT License](LICENSE). You can use, copy, change and redistribute it, including in commercial projects, as long as you keep the copyright and license notice.
+
+The MIT License covers this repository's code, shaders, documentation and its own content. It does not cover:
+- **The UE5 mannequin** in `Content/Demo/Characters/Mannequins` (Manny, Quinn and the Third Person template's animations). These are Epic Games content from the engine's templates and stay under the Unreal Engine EULA.
+- **FluidNinja LIVE.** It isn't included here and keeps its own license.
