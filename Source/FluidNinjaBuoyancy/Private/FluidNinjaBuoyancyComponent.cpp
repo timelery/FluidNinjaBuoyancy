@@ -228,7 +228,7 @@ void UFluidNinjaBuoyancyComponent::BeginPlay()
 	if (const UPrimitiveComponent* Placed = GetSimulatedPrimitive())
 	{
 		StartTransform = FTransform(Placed->GetComponentQuat(), Placed->GetComponentLocation());
-		if (!bWake && !Placed->GetGenerateOverlapEvents())
+		if (!bWake && Interaction == EFluidNinjaBuoyancyInteraction::Wakes && !Placed->GetGenerateOverlapEvents())
 		{
 			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: Wake is off, so it floats but leaves no ripples. Turn Wake on (see Docs/UserGuide.md, Interacting with FluidNinja)."),
 				*GetNameSafe(GetOwner()));

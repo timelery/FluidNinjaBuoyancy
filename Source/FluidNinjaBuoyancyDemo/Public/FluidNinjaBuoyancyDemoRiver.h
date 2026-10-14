@@ -58,6 +58,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "FluidNinja|Demo")
 	bool IsRunning() const { return bRunning; }
 
+	/**
+	 * How the floaters stir the river, measured: every floater gets this Interaction, the river resets, runs for 10 s, and the log gets
+	 * each floater's route (wakes, or FluidNinja's own tracking), the water under it and how far it went, against the reference
+	 * numbers; then the river resets and the floaters get their own Interaction back. Console: fnb.Demo.RiverTest [wakes | tracking].
+	 */
+	UFUNCTION(BlueprintCallable, Category = "FluidNinja|Demo")
+	void RunInteractionTest(bool bFluidNinjaTracking);
+
 	virtual void Tick(float DeltaSeconds) override;
 
 protected:
@@ -72,6 +80,7 @@ private:
 	void ShowCursor(bool bShow);
 	void AddPanel();
 	void RemovePanel();
+	void TickTest();
 
 	bool bRunning = false;
 	/** The simulation's own turbulence (velocity noise, bitmap velocity input), given back when the river runs. */
@@ -79,4 +88,10 @@ private:
 	bool bCursor = false;
 	bool bStillAgain = false;
 	TSharedPtr<SWidget> Panel;
+	// The interaction test: its stage (-1 idle), when the stage began, where the floaters started and the Interaction each had.
+	int32 TestStage = -1;
+	double TestMark = 0.0;
+	bool bTestTracking = false;
+	TMap<TWeakObjectPtr<UFluidNinjaBuoyancyComponent>, FVector> TestStart;
+	TMap<TWeakObjectPtr<UFluidNinjaBuoyancyComponent>, uint8> TestInteractionBefore;
 };

@@ -8,6 +8,7 @@
 #include "Engine/SceneCapture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
@@ -571,6 +572,166 @@ UFluidNinjaBuoyancySubsystem::FSlot* UFluidNinjaBuoyancySubsystem::FindSlot(int3
 	return Slots.FindByPredicate([Id](const FSlot& Slot) { return Slot.Id == Id; });
 }
 
+namespace
+{
+	/** A NinjaLive's say on whether its tracking paints velocity relative to the water: a bool or number property named Switch on the
+	 * actor or a component, or a float user parameter of its simulation; on above 0.5. */
+	bool ReadTrackingSwitch(const AActor& Actor, FName Switch, FString& OutHow)
+	{
+		TArray<const UObject*> Holders = {&Actor};
+		for (const UActorComponent* Component : Actor.GetComponents())
+		{
+			Holders.Add(Component);
+		}
+		for (const UObject* Holder : Holders)
+		{
+			if (const FBoolProperty* Flag = FindFProperty<FBoolProperty>(Holder->GetClass(), Switch))
+			{
+				OutHow = FString::Printf(TEXT("%s.%s"), *Holder->GetName(), *Switch.ToString());
+				return Flag->GetPropertyValue_InContainer(Holder);
+			}
+			if (const FNumericProperty* Number = FindFProperty<FNumericProperty>(Holder->GetClass(), Switch))
+			{
+				OutHow = FString::Printf(TEXT("%s.%s"), *Holder->GetName(), *Switch.ToString());
+				const void* Value = Number->ContainerPtrToValuePtr<void>(Holder);
+				return (Number->IsFloatingPoint() ? Number->GetFloatingPointPropertyValue(Value) : static_cast<double>(Number->GetSignedIntPropertyValue(Value))) > 0.5;
+			}
+		}
+		const FNiagaraVariable Parameter(FNiagaraTypeDefinition::GetFloatDef(), FName(*(TEXT("User.") + Switch.ToString())));
+		for (const UActorComponent* Component : Actor.GetComponents())
+		{
+			if (const UNiagaraComponent* Simulation = Cast<UNiagaraComponent>(Component))
+			{
+				if (Simulation->GetOverrideParameters().IndexOf(Parameter) != INDEX_NONE)
+				{
+					OutHow = FString::Printf(TEXT("%s user parameter %s"), *Simulation->GetName(), *Switch.ToString());
+					return Simulation->GetOverrideParameters().GetParameterValue<float>(Parameter) > 0.5f;
+				}
+			}
+		}
+		OutHow = FString::Printf(TEXT("no %s switch"), *Switch.ToString());
+		return false;
+	}
+}
+
+void UFluidNinjaBuoyancySubsystem::RefreshTracking()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	// The NinjaLive actors: the tag each tracks, and whether each paints tracked velocity relative to the water.
+	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
+	TArray<FName> Tags;
+	int32 Ninjas = 0;
+	bool bAllRelative = true;
+	FString Report;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		bool bHasSetting = false;
+		FName Tag = NAME_None;
+		TArray<const UObject*> Holders = {*It};
+		for (const UActorComponent* Component : It->GetComponents())
+		{
+			Holders.Add(Component);
+		}
+		for (const UObject* Holder : Holders)
+		{
+			if (const FNameProperty* Property = FindFProperty<FNameProperty>(Holder->GetClass(), Settings.TrackingTagProperty))
+			{
+				bHasSetting = true;
+				const FName Value = Property->GetPropertyValue_InContainer(Holder);
+				Tag = Value.IsNone() ? Tag : Value;
+			}
+		}
+		if (!bHasSetting)
+		{
+			continue;
+		}
+		++Ninjas;
+		FString How;
+		const bool bRelative = ReadTrackingSwitch(**It, Settings.RelativeTrackingSwitch, How);
+		bAllRelative &= bRelative;
+		if (!Tag.IsNone())
+		{
+			Tags.AddUnique(Tag);
+		}
+		Report += FString::Printf(TEXT("%s: tracking tag %s; paints tracked %s (%s)\n"), *It->GetName(), Tag.IsNone() ? TEXT("none (object types only)") : *Tag.ToString(),
+			bRelative ? TEXT("velocity relative to the water") : TEXT("world velocity"), *How);
+	}
+	const int32 Mode = FluidNinjaBuoyancyCVars::Tracking;
+	const bool bSafe = Ninjas > 0 && bAllRelative;
+	const bool bHandOver = Ninjas > 0 && (Mode == 2 || (Mode == 1 && bSafe));
+	TrackingReport = Ninjas > 0 ? Report : FString(TEXT("no NinjaLive in the level\n"));
+
+	for (FSlot& Slot : Slots)
+	{
+		UFluidNinjaBuoyancyComponent* Component = Slot.Component.Get();
+		UPrimitiveComponent* Primitive = Component ? Component->GetSimulatedPrimitive() : nullptr;
+		if (!Primitive)
+		{
+			continue;
+		}
+		const bool bWants = Component->Interaction != EFluidNinjaBuoyancyInteraction::Wakes;
+		if (bWants && bHandOver && !Slot.bHandedOver)
+		{
+			// FluidNinja's tracking sees primitives that generate overlap events (by object type, or by its tracking tag).
+			Slot.bOverlapBefore = Primitive->GetGenerateOverlapEvents();
+			Slot.AddedTags.Reset();
+			for (const FName& Tag : Tags)
+			{
+				if (!Primitive->ComponentTags.Contains(Tag))
+				{
+					Primitive->ComponentTags.Add(Tag);
+					Slot.AddedTags.Add(Tag);
+				}
+			}
+			Primitive->SetGenerateOverlapEvents(true);
+			Primitive->UpdateOverlaps();
+			Slot.bHandedOver = true;
+			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: handed to FluidNinja's own tracking %s, %s."), *GetNameSafe(Component->GetOwner()),
+				bSafe ? TEXT("(relative to the water)") : TEXT("(forced by fnb.Buoyancy.Tracking 2: FluidNinja paints its world velocity)"),
+				Component->Interaction == EFluidNinjaBuoyancyInteraction::Both ? TEXT("wakes as well") : TEXT("no wakes"));
+		}
+		else if (Slot.bHandedOver && (!bWants || !bHandOver))
+		{
+			for (const FName& Tag : Slot.AddedTags)
+			{
+				Primitive->ComponentTags.Remove(Tag);
+			}
+			Slot.AddedTags.Reset();
+			Primitive->SetGenerateOverlapEvents(Slot.bOverlapBefore);
+			Primitive->UpdateOverlaps();
+			Slot.bHandedOver = false;
+			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: taken back from FluidNinja's tracking; it makes wakes."), *GetNameSafe(Component->GetOwner()));
+		}
+		if (bWants && !Slot.bHandedOver && !Slot.bTrackingNoted)
+		{
+			Slot.bTrackingNoted = true;
+			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: Interaction asks for FluidNinja's tracking, but %s; it makes wakes instead."), *GetNameSafe(Component->GetOwner()),
+				Ninjas == 0 ? TEXT("there is no NinjaLive") : (Mode == 0 ? TEXT("fnb.Buoyancy.Tracking is 0")
+				: TEXT("FluidNinja paints tracked bodies' world velocity (no NinjaLive turns the Relative Tracking Switch on)")));
+		}
+		// FluidNinja's tracking needs overlap events, by object type or by tag.
+		Slot.bNinjaTracked = Primitive->GetGenerateOverlapEvents();
+		if (Slot.bNinjaTracked && Ninjas > 0 && !bSafe && !Slot.bTrackingWarned)
+		{
+			Slot.bTrackingWarned = true;
+			UE_LOG(LogFluidNinjaBuoyancy, Warning, TEXT("FluidNinja Buoyancy on %s: %s has Generate Overlap Events on, so FluidNinja's own tracking may paint its world velocity. ")
+				TEXT("Carried by a current, it then speeds that current up. Leave overlap events off and use Wake (see Docs/UserGuide.md, Interacting with FluidNinja)."),
+				*GetNameSafe(Component->GetOwner()), *Primitive->GetName());
+		}
+	}
+}
+
+void UFluidNinjaBuoyancySubsystem::GetTracking(const UFluidNinjaBuoyancyComponent* Component, bool& bOutTracked, bool& bOutHandedOver) const
+{
+	const FSlot* Slot = Slots.FindByPredicate([Component](const FSlot& Candidate) { return Candidate.Component == Component; });
+	bOutTracked = Slot && Slot->bNinjaTracked;
+	bOutHandedOver = Slot && Slot->bHandedOver;
+}
+
 void UFluidNinjaBuoyancySubsystem::RefreshSources()
 {
 	// The drawn water surface: the spline pieces and flat meshes of the tagged actors, and a Niagara water sheet. A
@@ -792,6 +953,11 @@ void UFluidNinjaBuoyancySubsystem::Tick(float DeltaTime)
 	{
 		NextSourceRefresh = Now + SourceRefreshSeconds;
 		RefreshSources();
+	}
+	if (Now >= NextTrackingRefresh)
+	{
+		NextTrackingRefresh = Now + 1.0;
+		RefreshTracking();
 	}
 	CollectReadbacks();
 	CaptureAndCopy();
@@ -1887,9 +2053,9 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			}
 		}
 		Component->ReceiveContacts(Contacts, Result.Wash, Result.WaterlineLength);
-		if (!bWakes || !Component->bWake)
+		if (!bWakes || !Component->bWake || (Slot.bHandedOver && Component->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking))
 		{
-			continue;
+			continue;   // no wakes, or FluidNinja's own tracking stirs the water for it
 		}
 		// Each point gives the water a share of what it lacks along the hull's outward normal: the hull's speed there minus the water's
 		// own (read where the point is). FluidNinja adds brush velocity every frame, so this closes on the hull's speed, never past it.
@@ -2193,8 +2359,26 @@ bool UFluidNinjaBuoyancySubsystem::GetBodyDebug(const UFluidNinjaBuoyancyCompone
 
 void UFluidNinjaBuoyancySubsystem::Reregister(UFluidNinjaBuoyancyComponent* Component)
 {
+	// The hand-over to FluidNinja's tracking belongs to the body, not to its slot: keep it, so it can still be given back.
+	FSlot Kept;
+	if (const FSlot* Old = Slots.FindByPredicate([Component](const FSlot& Slot) { return Slot.Component.Get() == Component; }))
+	{
+		Kept.bHandedOver = Old->bHandedOver;
+		Kept.bOverlapBefore = Old->bOverlapBefore;
+		Kept.AddedTags = Old->AddedTags;
+		Kept.bTrackingWarned = Old->bTrackingWarned;
+		Kept.bTrackingNoted = Old->bTrackingNoted;
+	}
 	Slots.RemoveAll([Component](const FSlot& Slot) { return Slot.Component.Get() == Component; });
 	Register(Component);
+	if (FSlot* New = Slots.FindByPredicate([Component](const FSlot& Slot) { return Slot.Component.Get() == Component; }))
+	{
+		New->bHandedOver = Kept.bHandedOver;
+		New->bOverlapBefore = Kept.bOverlapBefore;
+		New->AddedTags = MoveTemp(Kept.AddedTags);
+		New->bTrackingWarned = Kept.bTrackingWarned;
+		New->bTrackingNoted = Kept.bTrackingNoted;
+	}
 }
 
 bool UFluidNinjaBuoyancySubsystem::IsGathering() const

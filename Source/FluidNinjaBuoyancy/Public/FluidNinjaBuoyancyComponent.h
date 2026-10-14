@@ -24,6 +24,20 @@ struct FFluidNinjaWaterlineContact
 	float Plunge = 0.f;
 };
 
+/** How a floating body stirs the FluidNinja simulation. */
+UENUM(BlueprintType)
+enum class EFluidNinjaBuoyancyInteraction : uint8
+{
+	/** The plugin's wakes: water-line points in FluidNinja's data channel, written only where the hull moves through the water. */
+	Wakes,
+	/** FluidNinja's own tracking of the body's pivot, once FluidNinja paints tracked velocity relative to the water: the body then
+	 * generates overlap events and carries the NinjaLive's tracking tag, and writes no wakes. Until then (FluidNinja as it is today),
+	 * it makes wakes. */
+	FluidNinjaTracking UMETA(DisplayName = "FluidNinja Tracking"),
+	/** FluidNinja's tracking under the same condition, and wakes as well. */
+	Both UMETA(DisplayName = "FluidNinja Tracking and Wakes"),
+};
+
 UENUM(BlueprintType)
 enum class EFluidNinjaBuoyancyMass : uint8
 {
@@ -292,6 +306,13 @@ public:
 	 * point; the two can run together. */
 	UPROPERTY(EditAnywhere, Category = "Wake")
 	bool bWake = true;
+
+	/** How the body stirs the simulation: the plugin's wakes, or FluidNinja's own tracking once FluidNinja paints tracked velocity
+	 * relative to the water (Project Settings → FluidNinja Buoyancy → FluidNinja Tracking; console fnb.Buoyancy.Tracking). FluidNinja's
+	 * tracking as it is today paints a body's world velocity: a floater carried by a current then speeds that current up, so a
+	 * body is handed to it only when every NinjaLive says it tracks relative to the water. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake")
+	EFluidNinjaBuoyancyInteraction Interaction = EFluidNinjaBuoyancyInteraction::Wakes;
 
 	/** Brush size of each wake point at a push of 2 m/s (scaled 0.4–2x with the push). */
 	UPROPERTY(EditAnywhere, Category = "Wake", meta = (EditCondition = "bWake", ClampMin = "1", Units = "cm"))

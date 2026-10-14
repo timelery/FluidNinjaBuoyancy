@@ -145,6 +145,14 @@ public:
 	/** The test bench of this world (non-shipping game worlds), or null. */
 	FFluidNinjaBuoyancyTestBench* GetTestBench() const { return Bench.Get(); }
 
+	/** FluidNinja's own tracking: whether FluidNinja tracks this body (it generates overlap events or carries a NinjaLive's tracking
+	 * tag), and whether this plugin handed it over (its Interaction asks for it and FluidNinja tracks relative to the water). */
+	void GetTracking(const UFluidNinjaBuoyancyComponent* Component, bool& bOutTracked, bool& bOutHandedOver) const;
+	/** Why bodies are or are not handed to FluidNinja's tracking (one line per NinjaLive). */
+	const FString& GetTrackingReport() const { return TrackingReport; }
+	/** Looks at the NinjaLive actors again and hands bodies over or takes them back (also done every second). */
+	void RefreshTracking();
+
 private:
 	struct FSlot
 	{
@@ -183,6 +191,13 @@ private:
 		int32 VerifyFlowOnlyGathered = 0;
 		float SettledSeconds = 0.f;
 		double DormantSince = 0.0;
+		// FluidNinja's own tracking: FluidNinja tracks the body; this plugin handed it over (and what to give back).
+		bool bNinjaTracked = false;
+		bool bHandedOver = false;
+		bool bOverlapBefore = false;
+		TArray<FName> AddedTags;
+		bool bTrackingWarned = false;
+		bool bTrackingNoted = false;
 	};
 
 	/** A body the capture serves this frame, the square of water it needs, and the simulation whose current it reads. */
@@ -312,4 +327,6 @@ private:
 
 	FString Status;
 	uint32 PatchesBuilt = 0;
+	FString TrackingReport;
+	double NextTrackingRefresh = 0.0;
 };

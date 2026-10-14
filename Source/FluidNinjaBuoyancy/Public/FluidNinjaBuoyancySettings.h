@@ -121,6 +121,20 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Wake", meta = (ClampMin = "1"))
 	int32 MaxWakePoints = 256;
 
+	/** FluidNinja's own tracking, for bodies whose Interaction asks for it: the NinjaLive property (on the actor or its NinjaLive
+	 * component) holding the component tag it tracks, FluidNinja's Track Actor Primitive Components With Tag. A body handed to the
+	 * tracking gets that tag, besides Generate Overlap Events, which FluidNinja's tracking needs either way. */
+	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
+	FName TrackingTagProperty = TEXT("TrackActorPrimitiveComponentsWithTag");
+
+	/** How a NinjaLive says its tracking paints a body's velocity relative to the water under it (instead of its world velocity, which
+	 * makes a current speed itself up around floating bodies): a bool or number property of this name on the NinjaLive actor or one
+	 * of its components, or a float user parameter of its simulation; on above 0.5. FluidNinja does not have this yet; the name is
+	 * the proposal (see the user guide, "FluidNinja's own tracking"). Bodies are handed to the tracking only while every NinjaLive in
+	 * the level says so. Console: fnb.Buoyancy.Tracking. */
+	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
+	FName RelativeTrackingSwitch = TEXT("TrackVelocityRelativeToWater");
+
 	/** Defaults for bodies that set none of their own. The spray is spawned where a hull slams into the water or drives hard into
 	 * it, scaled by how hard; any Niagara system works. */
 	UPROPERTY(config, EditAnywhere, Category = "Effects", meta = (AllowedClasses = "/Script/Niagara.NiagaraSystem"))

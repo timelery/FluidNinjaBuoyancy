@@ -92,6 +92,7 @@ The Blueprints in `Demo/Blueprints` (`BP_FNB_Boat`, `BP_FNB_BeachBall`, `BP_FNB_
   - console commands and the test bench;
   - the demo level, its river switch and its character's push;
   - troubleshooting and known limitations.
+- [Proposal: FluidNinja tracking relative to the water](Docs/RelativeTrackingProposal.md). It explains why floating bodies stay off FluidNinja's own tracking today, proposes a change to FluidNinja, and explains how to test it with this branch.
 
 ## Repository layout
 

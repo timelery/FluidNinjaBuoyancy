@@ -79,6 +79,21 @@ namespace
 				UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("fnb.Demo.River start | stop | reset (now %s)"), River->IsRunning() ? TEXT("running") : TEXT("still"));
 			}
 		}));
+
+	FAutoConsoleCommandWithWorldAndArgs RiverTestCommand(TEXT("fnb.Demo.RiverTest"),
+		TEXT("How the floaters stir the demo river, measured over 10 s of flow: wakes (default) | tracking (FluidNinja's own tracking, when FluidNinja ")
+		TEXT("paints tracked velocity relative to the water; fnb.Buoyancy.Tracking 2 forces today's world-velocity tracking)."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+			{
+				if (AFluidNinjaBuoyancyDemoRiver* River = FindRiver(World))
+				{
+					River->RunInteractionTest(!Args.IsEmpty() && Args[0].ToLower() == TEXT("tracking"));
+				}
+				else
+				{
+					UE_LOG(LogFluidNinjaBuoyancyDemo, Warning, TEXT("fnb.Demo.RiverTest: no demo river in play."));
+				}
+			}));
 }
 
 AFluidNinjaBuoyancyDemoRiver::AFluidNinjaBuoyancyDemoRiver()
@@ -232,9 +247,111 @@ void AFluidNinjaBuoyancyDemoRiver::ResetRiver()
 	UE_LOG(LogFluidNinjaBuoyancyDemo, Log, TEXT("Demo river: %d floaters back at the head"), Count);
 }
 
+void AFluidNinjaBuoyancyDemoRiver::RunInteractionTest(bool bFluidNinjaTracking)
+{
+	if (TestStage >= 0)
+	{
+		UE_LOG(LogFluidNinjaBuoyancyDemo, Warning, TEXT("River test: one is already running."));
+		return;
+	}
+	bTestTracking = bFluidNinjaTracking;
+	TestStart.Reset();
+	TestInteractionBefore.Reset();
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (It->ActorHasTag(FloaterTag))
+		{
+			if (UFluidNinjaBuoyancyComponent* Body = It->FindComponentByClass<UFluidNinjaBuoyancyComponent>())
+			{
+				TestInteractionBefore.Add(Body, static_cast<uint8>(Body->Interaction));
+				Body->Interaction = bFluidNinjaTracking ? EFluidNinjaBuoyancyInteraction::FluidNinjaTracking : EFluidNinjaBuoyancyInteraction::Wakes;
+			}
+		}
+	}
+	ResetRiver();
+	if (UFluidNinjaBuoyancySubsystem* Buoyancy = GetWorld()->GetSubsystem<UFluidNinjaBuoyancySubsystem>())
+	{
+		Buoyancy->RefreshTracking();
+		UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s): %d floaters; FluidNinja:\n%s"), bFluidNinjaTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"),
+			TestInteractionBefore.Num(), *Buoyancy->GetTrackingReport());
+	}
+	TestStage = 0;
+	TestMark = GetWorld()->GetTimeSeconds();
+}
+
+void AFluidNinjaBuoyancyDemoRiver::TickTest()
+{
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (TestStage == 0 && Now - TestMark > 4.0)
+	{
+		// Settled at the head (and FluidNinja has taken the still river up): start.
+		for (const TPair<TWeakObjectPtr<UFluidNinjaBuoyancyComponent>, uint8>& Entry : TestInteractionBefore)
+		{
+			if (const UPrimitiveComponent* Primitive = Entry.Key.IsValid() ? Entry.Key->GetSimulatedPrimitive() : nullptr)
+			{
+				TestStart.Add(Entry.Key, Primitive->GetComponentLocation());
+			}
+		}
+		StartRiver();
+		TestStage = 1;
+		TestMark = Now;
+	}
+	else if (TestStage == 1 && Now - TestMark > 10.0)
+	{
+		const UFluidNinjaBuoyancySubsystem* Buoyancy = GetWorld()->GetSubsystem<UFluidNinjaBuoyancySubsystem>();
+		double WaterSum = 0.0;
+		double WaterMax = 0.0;
+		double DistanceSum = 0.0;
+		int32 Count = 0;
+		for (const TPair<TWeakObjectPtr<UFluidNinjaBuoyancyComponent>, FVector>& Entry : TestStart)
+		{
+			const UFluidNinjaBuoyancyComponent* Body = Entry.Key.Get();
+			const UPrimitiveComponent* Primitive = Body ? Body->GetSimulatedPrimitive() : nullptr;
+			if (!Primitive)
+			{
+				continue;
+			}
+			bool bTracked = false;
+			bool bHandedOver = false;
+			if (Buoyancy)
+			{
+				Buoyancy->GetTracking(Body, bTracked, bHandedOver);
+			}
+			const double Water = Body->GetReadout().FlowCmS.Size() / 100.0;
+			const double Distance = FVector::Dist2D(Primitive->GetComponentLocation(), Entry.Value) / 100.0;
+			WaterSum += Water;
+			WaterMax = FMath::Max(WaterMax, Water);
+			DistanceSum += Distance;
+			++Count;
+			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test   %-28s %s: water under it %.1f m/s, went %.1f m"), *GetNameSafe(Body->GetOwner()),
+				bHandedOver ? TEXT("FluidNinja tracking") : (bTracked ? TEXT("FluidNinja tracking (set by hand)") : TEXT("wakes")), Water, Distance);
+		}
+		if (Count > 0)
+		{
+			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s), 10 s after the start: water under the floaters %.1f m/s mean, %.1f max; they went %.1f m on average.\n")
+				TEXT("  Reference (FluidNinja Buoyancy 1.0.1, demo river): wakes 2.0 m/s mean, 2.8 max, 14.9 m; no interaction 1.7 / 2.4 m/s, 11.8 m;\n")
+				TEXT("  today's FluidNinja tracking (world velocity) 4.9-5.1 m/s mean, up to the 6 m/s read limit, 28 m. Relative tracking should land near the wakes."),
+				bTestTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"), WaterSum / Count, WaterMax, DistanceSum / Count);
+		}
+		ResetRiver();
+		for (const TPair<TWeakObjectPtr<UFluidNinjaBuoyancyComponent>, uint8>& Entry : TestInteractionBefore)
+		{
+			if (UFluidNinjaBuoyancyComponent* Body = Entry.Key.Get())
+			{
+				Body->Interaction = static_cast<EFluidNinjaBuoyancyInteraction>(Entry.Value);
+			}
+		}
+		TestStage = -1;
+	}
+}
+
 void AFluidNinjaBuoyancyDemoRiver::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	if (TestStage >= 0)
+	{
+		TickTest();
+	}
 	// FluidNinja may apply its preset after this actor's Begin Play: say "still" again once it is surely up.
 	if (!bRunning && !bStillAgain && GetWorld()->GetTimeSeconds() > 2.0)
 	{

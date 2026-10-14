@@ -12,6 +12,7 @@ namespace FluidNinjaBuoyancyCVars
 	int32 Wake = 1;
 	int32 Gather = 1;
 	int32 Implicit = 1;
+	int32 Tracking = 1;
 	float BoatThrottle = 0.f;
 	float BoatRudder = 0.f;
 
@@ -23,6 +24,10 @@ namespace FluidNinjaBuoyancyCVars
 		TEXT("1: the water's stiffness and drag that a physics step is too long for are applied implicitly, so light bodies stay stable at any frame rate ")
 		TEXT("(Project Settings → FluidNinja Buoyancy → Stable Steps). 0: plain explicit forces (A/B)."));
 
+	static FAutoConsoleVariableRef CVarTracking(TEXT("fnb.Buoyancy.Tracking"), Tracking,
+		TEXT("Bodies whose Interaction asks for FluidNinja's own tracking: 0 never (wakes only), 1 only while every NinjaLive paints tracked velocity ")
+		TEXT("relative to the water (Project Settings → FluidNinja Buoyancy → FluidNinja Tracking), 2 always, for testing: today's FluidNinja then ")
+		TEXT("paints their world velocity, which speeds a current up."));
 	static FAutoConsoleVariableRef CVarEnable(TEXT("fnb.Buoyancy"), Enable,
 		TEXT("Buoyancy on FluidNinja water (Project Settings → Game → FluidNinja Buoyancy). 0 off, 1 on, 2 on with the debug view (water line, forces, the water read back)."));
 	static FAutoConsoleVariableRef CVarThrottle(TEXT("fnb.Boat.Throttle"), BoatThrottle,
