@@ -10,7 +10,7 @@ FluidNinja Buoyancy is a code plugin for Unreal Engine that sits on top of Fluid
 
 - **Floats on the water you see.** Every frame the plugin takes an orthographic depth capture of the water surface: FluidNinja's river spline pieces, pool planes and Niagara water sheets, including FluidNinja's pressure waves and tile displacement. Bodies float on that.
 - **Currents.** It reads the simulation's velocity buffer, so bodies drift where the dye flows.
-- **Wakes.** Moving hulls write their bow waves and wakes into FluidNinja's point input (its Niagara Data Channel). The simulation turns them into ripples and foam.
+- **Wakes.** Moving hulls write their bow waves and wakes into FluidNinja's point input (its Niagara Data Channel), and a dropped body writes a ring. The simulation turns them into ripples and foam. Only motion through the water is written, so bodies drifting with the current leave it as it is.
 - **Three hull models:**
   - **Triangles**, for boats and rafts. The hull is cut at the water line on every physics step and gets hydrostatic pressure, pressure drag, suction, skin friction and slamming.
   - **Voxels**, for crates, logs and debris.
@@ -76,7 +76,8 @@ Walk out along the dock, push the floating things, or jump into the deep end and
 1. Make sure the water surface actor carries one of the surface tags. FluidNinja's river spline pieces (`SplineSource`) and sea surfaces (`SeaSurface`) already do. For anything else, such as a pool plane or a lake mesh, add the tag `FluidNinjaBuoyancySurface`.
 2. Add a **FluidNinja Buoyancy** component to an actor whose root component is a static mesh with simple collision (a box, sphere, capsule or convex hull).
 3. Set **Rest Draft** to how deep it should sit in calm water. The plugin works out the mass from it.
-4. Press Play. The body waits until its water has been read, then is set down on it at its rest draft.
+4. Leave **Wake** on: that is how the body stirs the simulation. Leave **Generate Overlap Events** off on it, as a StaticMeshActor has it. FluidNinja's own overlap tracking paints a body's world velocity, so a floater carried by the current would speed that current up. See [Interacting with FluidNinja](Docs/UserGuide.md#interacting-with-fluidninja).
+5. Press Play. The body waits until its water has been read, then is set down on it at its rest draft.
 
 The Blueprints in `Demo/Blueprints` (`BP_FNB_Boat`, `BP_FNB_BeachBall`, `BP_FNB_Crate` and the rest) are ready-made examples you can drop into your own FluidNinja levels.
 

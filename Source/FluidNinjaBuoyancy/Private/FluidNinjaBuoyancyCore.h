@@ -162,6 +162,7 @@ namespace FluidNinjaBuoyancy
 		FVector HullVelocity = FVector::ZeroVector;  // of the hull there, world
 		FVector Outward = FVector::ZeroVector;       // horizontal hull normal, unit
 		float Push = -TNumericLimits<float>::Max();  // cm/s the hull drives into the water there (relative to the water)
+		float Plunge = 0.f;                          // cm/s the hull sinks into the water there: the water it displaces runs outward
 		bool bValid = false;
 	};
 

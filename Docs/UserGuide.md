@@ -83,9 +83,42 @@ Outside the capture, a body floats on the top of the Physics Volume (with **Wate
 
 If there is no volume, a body that was afloat is held asleep until its water can be read again, rather than sinking.
 
-### Wakes
+### Interacting with FluidNinja
 
-FluidNinja must read its point input for wakes to appear. Check that the NinjaLive component has **DataChannelPointReaderEnabled** on. FluidNinja's presets turn it on. The data channel used is **Wake Data Channel**: `NinjaDataChannel1_Global` by default.
+Floating bodies stir the simulation through the plugin's **wakes**. FluidNinja also tracks objects itself, but leave that off for floating bodies.
+
+| | This plugin's wakes (use these) | FluidNinja's own tracking (leave it off for floating bodies) |
+|---|---|---|
+| **Switch it on** | **Wake** on the component, **Wakes** in the project settings, and **DataChannelPointReaderEnabled** on in the NinjaLive component (FluidNinja's presets turn it on). No tags or overlap events are needed. | **Generate Overlap Events** on the primitive, with its object type in the NinjaLive actor's **Overlap Filter Inclusive Obj Type** (NinjaLive's default is Pawn only). Or the NinjaLive's **Track Actor Primitive Components With Tag**. |
+| **What reaches FluidNinja** | Up to 16 points along the hull's water line, written to FluidNinja's data channel (**Wake Data Channel**, `NinjaDataChannel1_Global` by default). A point is written where the hull moves into the water: sideways through it, or sinking into it, which sends the displaced water outward (a drop makes a ring). Each point carries only what the water there still lacks of the hull's speed *through the water*, so a body drifting with the current writes nothing. Data channel points add velocity only, no dye. | The body's pivot point, painted every frame with the body's *world* velocity and sized from its bounds. |
+| **In a current** | Bodies drift with it and leave it as it is. | A floater moves with the current, so its world velocity *is* the current, and it paints the current back into the water every frame. The current then speeds itself up. |
+
+Measured in the demo river, with eight floaters and the river switched on:
+
+| | Overlap events off (wakes only) | Overlap events on |
+|---|---|---|
+| Water under the floaters after 10 s | 1.0 to 2.8 m/s | 1.7 to at least 6 m/s (6 m/s is the plugin's read limit, **Max Flow Speed**) |
+| Distance travelled in 10 s | 11 to 21 m | 17 to 37 m |
+
+Two runs with overlap events on agreed, and the run with them off matched version 1.0.0.
+
+Points to know:
+- **A StaticMeshActor has Generate Overlap Events off by default.** That is right for a floating body. If one needs overlap events for gameplay, leave PhysicsBody out of the NinjaLive actor's object-type filter.
+- **FluidNinja's tracking is the right tool for characters,** and for anything that moves under its own power: its world velocity is its push.
+- **A body with Wake off logs it.** At Begin Play it logs "Wake is off, so it floats but leaves no ripples".
+- **A body that stirs the water rides the current around it.** With Wake on, or Generate Overlap Events on, a body takes its current from a ring of water outside its reach (its bounds plus 50 cm), not from the water it has just pushed. Otherwise it would be carried along by its own wake.
+  - The plugin goes by the flag. It can't tell whether a simulation's filter actually picks the body up. A body with overlap events on for gameplay reasons also rides the ring current, which differs from the current under it only in eddies smaller than the body.
+
+**Changed in 1.0.1.** In 1.0.0:
+- the wakes were horizontal only, so a body lifted out of the water or dropped into it wrote nothing;
+- a single-pontoon sphere (the beach ball) had no water line at all. Its one piece faced away from the body's own centre, which gives no direction, so it had no wake, wet line or bow spray;
+- the demo's balls, ring buoys and air mattress have Wake off, so they don't stir the water. That is still so in 1.0.1, by choice; see [Wakes](#wakes).
+
+1.0.1 makes these changes:
+- the wakes include sinking;
+- a sphere body's water line runs round each sphere in eight pieces;
+- a body FluidNinja tracks itself rides the ring current;
+- Begin Play logs a body with Wake off.
 
 ---
 
@@ -272,16 +305,20 @@ Where a hull slams into the water (over **Splash Min Watts**, 300 W) or its wate
 
 ## Wakes
 
-With **Wake** on (component), **Wakes** on (project) and `fnb.Buoyancy.Wake 1`, each frame the pieces of water line that drive into the water are written to FluidNinja's point input as moving brush points. FluidNinja then makes the bow wave, the wake and the foam.
+With **Wake** on (component), **Wakes** on (project) and `fnb.Buoyancy.Wake 1`, each frame the pieces of water line that drive into the water are written to FluidNinja's point input as moving brush points. FluidNinja then makes the bow wave, the wake and the foam. This is how floating bodies stir the simulation; see [Interacting with FluidNinja](#interacting-with-fluidninja) for why FluidNinja's own overlap tracking is left off for them.
+
+A piece drives into the water in two ways. Moving sideways, it pushes at its speed through the water along the hull's outward normal. Sinking, it pushes outward at about its sinking speed: a hull of water plane A and water line L displaces water over a layer about A / L deep. A drop or a dunk therefore sends a ring out, and a body rising out of the water writes nothing. A sphere's water line is its own circle, in eight pieces, each facing out from that sphere's centre.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | Wake Brush Size | 60 cm | The brush size at a push of 2 m/s, scaled 0.4–2× with the push. |
-| Wake Min Push | 20 cm/s | Slower pieces leave no wake. |
+| Wake Min Push | 20 cm/s | Slower pieces leave no wake (sideways and sinking speed together), so a body bobbing gently at rest stays quiet. |
 | Wake Strength | 0.35 | How much of the hull's speed through the water the water at the hull takes on. 1 would make it a wall. A hull stirs only the water near the surface. |
 | Wake Gain | 0.15 | The share of what the water lacks that each frame gives it. FluidNinja adds brush velocity every frame, so this closes on the target without overshooting. |
 
-A body that makes wakes takes its current from the water around it, not from its own wake. Light bodies, such as the demo's balls, ring buoys and mattress, have Wake off.
+A body that makes wakes takes its current from the water around it, not from its own wake. The same applies to a body that FluidNinja tracks itself (Generate Overlap Events on).
+
+That has a price for light bodies. Reading the current outside its own reach, a body no longer rides the water that others push right next to it: a swimmer's bow wave, another hull's wake. So the demo's light bodies (balls, ring buoys and the air mattress) have Wake off. They ride the water rather than stir it. Since 1.0.1 a sphere body has a proper water line, so Wake does work on them; it is a choice per body. Measured in the demo pool: with Wake on, the swimmer tipped the ring buoy onto its edge and held it there in both of two pushes. With Wake off it was pushed ahead instead, both times. In the river, Wake on or off made no difference.
 
 ---
 
@@ -414,7 +451,7 @@ Results go to:
 | The river | North of the pool, from FluidNinja's river setup: a 45 m lane from its head (west) to a basin (east), 13 m wide, with a 4 m deep channel down the middle between stepped banks. See [the river](#the-river) below. |
 | The player | **FluidNinja Buoyancy Demo Character** (module `FluidNinjaBuoyancyDemo`): the UE5 mannequin (Manny) with the Third Person template's unarmed Animation Blueprint, in `Demo/Characters/Mannequins`, and a third-person camera. It starts on the deck between the pool and the river's head.<br>• Move: WASD or the left stick.<br>• Look: the mouse or the right stick.<br>• Jump: Space or the bottom face button; held while swimming, swim up.<br>It reads the keys directly, so it needs no input mappings in your project. It swims in the water volumes and walks down the steps. It pushes floating bodies it walks into (see [the push](#the-push) below), and its weight presses down on any it stands on. |
 | The ground | Grass out to 150 m around the decks, so the player can walk off them, and so the test bench's walk-away test has somewhere to go. |
-| The floating things | Each a Blueprint in `Demo/Blueprints`, listed below. In the pool: a boat, two beach balls, a ring buoy, a crate and an air mattress. At the river's head: a boat, two crates, three beach balls, a barrel and a ring buoy. |
+| The floating things | Each a Blueprint in `Demo/Blueprints`, listed below. In the pool: a boat, two beach balls, a ring buoy, a crate and an air mattress. At the river's head: a boat, two crates, three beach balls, a barrel and a ring buoy. The boat, crates and barrel make wakes; the light ones ride the water (Wake off, see [Wakes](#wakes)). None has Generate Overlap Events on (see [Interacting with FluidNinja](#interacting-with-fluidninja)). |
 
 | Blueprint | Hull model | Rest draft | Mass | Notes |
 |---|---|---|---|---|
@@ -501,6 +538,8 @@ The test bench panel (`fnb.TestHUD 1`) shows the measured costs: game thread, ph
 | No current | The surface material must have the `VelocityDensityBuffer` texture parameter set by FluidNinja. The panel's status lists each simulation found ("NOT PLACED" means its square is unknown). |
 | Bodies drift too fast or too slowly | Use **Flow Scale Multiplier** (project), **Flow Coupling** (body) or `fnb.Buoyancy.CalibrateFlow`. |
 | No wakes | Is DataChannelPointReaderEnabled on in the NinjaLive component? Are Wake on (component), Wakes on (project) and `fnb.Buoyancy.Wake 1`? |
+| A body makes no ripples | Its **Wake** is off (the log says "Wake is off, so it floats but leaves no ripples"; the demo's light bodies are set so on purpose), or the NinjaLive component's DataChannelPointReaderEnabled is off. A body drifting with the current writes nothing by design; push it, drop it or row it. Don't turn on Generate Overlap Events for floating bodies instead: see [Interacting with FluidNinja](#interacting-with-fluidninja). |
+| The current speeds up around floating things, up to Max Flow Speed | FluidNinja's own tracking paints them: they have Generate Overlap Events on and PhysicsBody is in the NinjaLive actor's **Overlap Filter Inclusive Obj Type**. Turn one of the two off. See [Interacting with FluidNinja](#interacting-with-fluidninja). |
 | No wet line | The hull's material lacks `MF_FNB_HullWetness`, or Wet Line Data Index clashes with other Custom Primitive Data. |
 | No sound | No sounds ship. See [Hull sounds](#hull-sounds). The wash also needs its Sound Wave set to Looping. |
 | A body jitters or capsizes | Run **Analyze Hull**. A negative metacentric height capsizes: lower **Center Of Mass Offset Z**. For a cube between 21 % and 79 % draft, resting on an edge is correct. |

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.0",
+	"Version": 2,
+	"VersionName": "1.0.1",
 	"FriendlyName": "FluidNinja Buoyancy",
 	"Description": "Physics bodies float on FluidNinja LIVE water exactly as it is drawn: its waves, its current, and the wakes they write back into the simulation. Requires FluidNinja LIVE in the project.",
 	"Category": "Physics",

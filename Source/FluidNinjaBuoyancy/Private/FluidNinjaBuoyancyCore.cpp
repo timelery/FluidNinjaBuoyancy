@@ -599,6 +599,9 @@ namespace FluidNinjaBuoyancy
 			}
 			const FVector HullVelocity = Body.Velocity + FVector::CrossProduct(Body.AngularVelocity, Mid - Body.CenterOfMass);
 			FVector Relative = HullVelocity - WaterVelocity;
+			// Sinking, the hull displaces water through its water plane, and that water leaves outward across the water line: for a
+			// hull of water plane A and water line L it spreads over a layer about A / L deep, so it runs out at about the sinking speed.
+			const float Plunge = static_cast<float>(FMath::Max(0.0, -Relative.Z));
 			Relative.Z = 0.0;
 			Out.WaterlineLength += Length;
 			WashSum += Length * Relative.Size();
@@ -606,7 +609,7 @@ namespace FluidNinjaBuoyancy
 			const double Horizontal = Outward.Size();
 			if (Horizontal < 0.2)
 			{
-				return;   // a flat bottom or deck piece: no side to push with
+				return;   // a flat bottom or deck piece (or a point on the hull's axis): no side to push with
 			}
 			Outward /= Horizontal;
 			const float Push = static_cast<float>(FVector::DotProduct(Relative, Outward));
@@ -614,12 +617,13 @@ namespace FluidNinjaBuoyancy
 			const float Angle = static_cast<float>(FMath::Atan2(Local.Y, Local.X));
 			const int32 Sector = FMath::Clamp(FMath::FloorToInt32((Angle + PI) / (2.f * PI) * WaterlineSectors), 0, WaterlineSectors - 1);
 			FWaterlineSample& Sample = Out.Sectors[Sector];
-			if (!Sample.bValid || Push > Sample.Push)
+			if (!Sample.bValid || Push + Plunge > Sample.Push + Sample.Plunge)
 			{
 				Sample.Position = Mid;
 				Sample.HullVelocity = HullVelocity;
 				Sample.Outward = Outward;
 				Sample.Push = Push;
+				Sample.Plunge = Plunge;
 				Sample.bValid = true;
 			}
 		}
@@ -822,14 +826,40 @@ namespace FluidNinjaBuoyancy
 							Out.SpinDamping += FVector(2.f * Shear / Spin);
 						}
 					}
-					if (bWaterline && Out.Waterline.Num() < 2048)
+					if (Fraction < 1.f && bSpheres)
 					{
-						Out.Waterline.Add(FVector(Centre.X - Size, Centre.Y, Height));
-						Out.Waterline.Add(FVector(Centre.X + Size, Centre.Y, Height));
+						// A sphere's water line is its own circle: pieces all round it, each facing out from the sphere's centre. (Taken as
+						// one piece facing away from the body's centre, a ball on its body's axis had no side to push with: no wake, no wet
+						// line, no bow spray.)
+						const float LineDepth = static_cast<float>(Height - Centre.Z);
+						const float CircleRadius = FMath::Sqrt(FMath::Max(Size * Size - LineDepth * LineDepth, 0.f));
+						if (CircleRadius >= 1.f)
+						{
+							constexpr int32 Pieces = 8;
+							const float PieceLength = 2.f * PI * CircleRadius / Pieces;
+							for (int32 Piece = 0; Piece < Pieces; ++Piece)
+							{
+								const float Theta = 2.f * PI * (Piece + 0.5f) / Pieces;
+								const FVector Facing(FMath::Cos(Theta), FMath::Sin(Theta), 0.0);
+								const FVector OnLine = FVector(Centre.X, Centre.Y, Height) + Facing * CircleRadius;
+								AddWaterline(Out, Hull, Body, OnLine, PieceLength, Facing, WaterVelocity, WashSum);
+								if (bWaterline && Out.Waterline.Num() < 2048)
+								{
+									const float Next = 2.f * PI * (Piece + 1.5f) / Pieces;
+									Out.Waterline.Add(OnLine);
+									Out.Waterline.Add(FVector(Centre.X, Centre.Y, Height) + FVector(FMath::Cos(Next), FMath::Sin(Next), 0.0) * CircleRadius);
+								}
+							}
+						}
 					}
-					if (Fraction < 1.f)
+					else if (Fraction < 1.f)
 					{
-						AddWaterline(Out, Hull, Body, FVector(Centre.X, Centre.Y, Height), bSpheres ? 2.f * Size : Size, Centre - BodyCentre, WaterVelocity, WashSum);
+						if (bWaterline && Out.Waterline.Num() < 2048)
+						{
+							Out.Waterline.Add(FVector(Centre.X - Size, Centre.Y, Height));
+							Out.Waterline.Add(FVector(Centre.X + Size, Centre.Y, Height));
+						}
+						AddWaterline(Out, Hull, Body, FVector(Centre.X, Centre.Y, Height), Size, Centre - BodyCentre, WaterVelocity, WashSum);
 					}
 				}
 				if (Fraction < 1.f && P.RhoAir > 0.f && P.AirDragCoefficient > 0.f)

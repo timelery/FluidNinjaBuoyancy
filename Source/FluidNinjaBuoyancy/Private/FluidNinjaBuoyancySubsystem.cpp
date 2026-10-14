@@ -1845,7 +1845,7 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			{
 				if (Sample.bValid)
 				{
-					Contacts.Add({Sample.Position, Sample.HullVelocity, Sample.Outward, Sample.Push});
+					Contacts.Add({Sample.Position, Sample.HullVelocity, Sample.Outward, Sample.Push, Sample.Plunge});
 				}
 			}
 		}
@@ -1870,11 +1870,12 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			{
 				continue;   // no water read here
 			}
-			// The hull's push through the water around it; the water at the hull should move on with the current plus a share of
-			// that (Wake Strength), and gets a share of what it still lacks (Wake Gain) each frame.
+			// The hull's push through the water around it, sideways plus the water it displaces as it sinks (a drop or a dunk sends a
+			// ring out); the water at the hull should move on with the current plus a share of that (Wake Strength), and gets a share
+			// of what it still lacks (Wake Gain) each frame.
 			const FVector2f Around = Patch->bAmbient ? Patch->AmbientAt(Contact.Position.X, Contact.Position.Y) : Local;
 			const FVector Outward = Contact.Outward;
-			const float Through = static_cast<float>(FVector::DotProduct(Contact.HullVelocity - FVector(Around.X, Around.Y, 0.0), Outward));
+			const float Through = static_cast<float>(FVector::DotProduct(Contact.HullVelocity - FVector(Around.X, Around.Y, 0.0), Outward)) + Contact.Plunge;
 			if (Through < Component->WakeMinPushCmS)
 			{
 				continue;
@@ -1960,7 +1961,10 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			BodyInput.Extrapolate = BodyInput.Patch.IsValid() ? FMath::Clamp(static_cast<float>(Now - BodyInput.Patch->Time), 0.f, Settings.MaxExtrapolationSeconds) : 0.f;
 			BodyInput.bFlat = Slot.bFlat;
 			BodyInput.FlatHeight = Slot.FlatHeight;
-			BodyInput.bAmbientFlow = Component->bWake && Settings.bWakes && FluidNinjaBuoyancyCVars::Wake != 0;
+			// A body that pushes the water itself is carried by the current around it, not by the water it has just pushed (which
+			// would carry it on with its own speed): one that makes wakes, or one FluidNinja paints in itself (its overlap tracking
+			// sees primitives that generate overlap events).
+			BodyInput.bAmbientFlow = (Component->bWake && Settings.bWakes && FluidNinjaBuoyancyCVars::Wake != 0) || Primitive->GetGenerateOverlapEvents();
 		}
 		Component->FillParams(BodyInput.Params);
 		BodyInput.Params.Rho = Settings.WaterDensity * 1e-6f;
@@ -2529,8 +2533,9 @@ void UFluidNinjaBuoyancySubsystem::DrawDebug()
 			DrawDebugPoint(World, Output->CenterOfMass, 10.f, FColor::Red);
 			for (const FFluidNinjaWaterlineContact& Contact : Component->GetContacts())
 			{
-				const bool bWaking = Contact.Push >= Component->WakeMinPushCmS;
-				DrawDebugLine(World, Contact.Position, Contact.Position + Contact.Outward * FMath::Clamp(Contact.Push, 0.f, 300.f) * 0.3,
+				const float Drive = Contact.Push + Contact.Plunge;
+				const bool bWaking = Drive >= Component->WakeMinPushCmS;
+				DrawDebugLine(World, Contact.Position, Contact.Position + Contact.Outward * FMath::Clamp(Drive, 0.f, 300.f) * 0.3,
 					bWaking ? FColor::Orange : FColor(90, 90, 90), false, -1.f, 0, bWaking ? 3.f : 1.f);
 			}
 		}

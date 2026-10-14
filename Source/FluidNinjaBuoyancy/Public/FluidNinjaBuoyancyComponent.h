@@ -19,6 +19,9 @@ struct FFluidNinjaWaterlineContact
 	FVector Outward = FVector::ZeroVector;
 	/** How fast the hull drives into the water there (cm/s, relative to the water); negative where it pulls away. */
 	float Push = 0.f;
+	/** How fast the hull sinks into the water there (cm/s, 0 when it rises): the water it displaces runs outward from the water line
+	 * at about this speed (a dropped or dunked body makes a ring). */
+	float Plunge = 0.f;
 };
 
 UENUM(BlueprintType)
@@ -282,8 +285,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (ClampMin = "-1", ClampMax = "1"))
 	float Rudder = 0.f;
 
-	/** Pushes the water: the pieces of water line driving into it are written into FluidNinja as moving brush points, so the
-	 * simulation makes the bow wave, the wake and foam (Project Settings → FluidNinja Buoyancy → Wake; console fnb.Buoyancy.Wake). */
+	/** Pushes the water: the pieces of water line driving into it (sideways, or outward as the hull sinks in: a drop makes a ring)
+	 * are written into FluidNinja's data channel as moving brush points, so the simulation makes the bow wave, the wake and foam
+	 * (Project Settings → FluidNinja Buoyancy → Wake; console fnb.Buoyancy.Wake). This works without tags or overlap events. It is
+	 * separate from FluidNinja's own tracking (Generate Overlap Events on the floating primitive), which paints the body's pivot
+	 * point; the two can run together. */
 	UPROPERTY(EditAnywhere, Category = "Wake")
 	bool bWake = true;
 
@@ -297,7 +303,8 @@ public:
 
 	/** Each frame a wake point gives the water this share of what it lacks: the hull's outward speed there minus the water's own.
 	 * FluidNinja adds brush velocity every frame, so the water near the hull approaches the hull's speed and never overshoots it.
-	 * A body that makes wakes takes its current from the water around it, not from its own wake. */
+	 * A body that makes wakes, or that FluidNinja tracks itself (Generate Overlap Events on), takes its current from the water around
+	 * it, not from the water it has just pushed. */
 	UPROPERTY(EditAnywhere, Category = "Wake", meta = (EditCondition = "bWake", ClampMin = "0", ClampMax = "1"))
 	float WakeGain = 0.15f;
 
