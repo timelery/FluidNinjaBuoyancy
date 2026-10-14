@@ -14,7 +14,7 @@ namespace FluidNinjaBuoyancyCVars
 	extern int32 Gather;
 	/** fnb.Buoyancy.Implicit: 1 stable steps (when the settings allow them), 0 plain explicit forces. */
 	extern int32 Implicit;
-	/** fnb.Buoyancy.Tracking: 0 never hand bodies to FluidNinja's tracking, 1 when FluidNinja tracks relative to the water, 2 always (testing). */
+	/** fnb.Buoyancy.Tracking: 0 never hand bodies to FluidNinja's tracking (they do not stir the water), 1 when FluidNinja tracks relative to the water, 2 always (testing). */
 	extern int32 Tracking;
 	extern float BoatThrottle;
 	extern float BoatRudder;

@@ -70,17 +70,17 @@ So the recommendation is `v_painted = Strength × (v_pivot − v_water)` with St
 
 ## How to test it with this branch
 
-The branch (`fluidninja-relative-tracking`) can hand bodies to FluidNinja's tracking, but only when FluidNinja says it tracks relative to the water:
-- **The per-body setting.** **Interaction** has three values: Wakes (the default), FluidNinja Tracking, and FluidNinja Tracking and Wakes.
-- **What hand-over means.** A body that asks for tracking gets Generate Overlap Events, plus the NinjaLive's tracking tag if it sets one, and it writes no wakes.
+The branch (`fluidninja-relative-tracking`) is the version of FluidNinja Buoyancy for the modified FluidNinja. Its floating bodies stir the water through FluidNinja's own tracking, and `main` keeps the wakes for FluidNinja as it is today.
+- **The per-body setting.** **Interaction** defaults to FluidNinja Tracking on this branch. FluidNinja Tracking and Wakes, or Wakes alone, can still be chosen explicitly.
+- **What hand-over means.** A FluidNinja Tracking body gets Generate Overlap Events, plus the NinjaLive's tracking tag if it sets one, and it never writes wakes.
 - **When it happens.** Only while every NinjaLive in the level turns on the switch named in **Project Settings → FluidNinja Buoyancy → FluidNinja Tracking → Relative Tracking Switch**. The default name is `TrackVelocityRelativeToWater`. The switch can be a bool or number property on the NinjaLive actor or a component, or a float user parameter; it is on above 0.5.
-- **Otherwise** the body makes wakes, so the branch is harmless on today's FluidNinja.
+- **No fallback.** With an unmodified FluidNinja, the bodies are not tracked and do not stir the water, and the log reports an error naming the missing switch. They are never handed to world-velocity tracking unless you force it.
 - **The console variable.** `fnb.Buoyancy.Tracking`: 0 never hands bodies over, 1 hands them over when the switch is on (the default), 2 always does, to reproduce today's behaviour.
 
 To test:
 1. Open the demo level (`FluidNinjaBuoyancy/Demo/Maps/FNB_DemoPool`) and press Play.
 2. Type `fnb.Demo.RiverTest wakes` in the console. After about 15 s the log lists each floater's route, the water under it and how far it went, with the reference numbers. That is the baseline: about 1.7 to 1.8 m/s mean and 11 to 15 m.
 3. Type `fnb.Buoyancy.Tracking 2`, then `fnb.Demo.RiverTest tracking`. Today's FluidNinja paints world velocity: expect about 4.7 m/s mean, up to the 6 m/s limit, and 28 m.
-4. With your change and the switch on, type `fnb.Buoyancy.Tracking 1`, then `fnb.Demo.RiverTest tracking`. The log should say each floater was handed to FluidNinja's tracking relative to the water. The numbers should land near the wakes.
+4. With your change and the switch on, type `fnb.Buoyancy.Tracking 1`, then `fnb.Demo.RiverTest tracking`. The log should say each floater was handed to FluidNinja's tracking relative to the water. The numbers should land near the wakes. Without the switch, the log reports each floater as not tracked and the river behaves as with no interaction (about 1.7 m/s, 12 m).
 
 The distance varies by a few metres from run to run. Judge mainly by the water speed and the roughly twofold gap in distance.

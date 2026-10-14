@@ -323,14 +323,17 @@ void AFluidNinjaBuoyancyDemoRiver::TickTest()
 			WaterMax = FMath::Max(WaterMax, Water);
 			DistanceSum += Distance;
 			++Count;
-			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test   %-28s %s: water under it %.1f m/s, went %.1f m"), *GetNameSafe(Body->GetOwner()),
-				bHandedOver ? TEXT("FluidNinja tracking") : (bTracked ? TEXT("FluidNinja tracking (set by hand)") : TEXT("wakes")), Water, Distance);
+			const TCHAR* Route = bHandedOver ? TEXT("FluidNinja tracking")
+				: bTracked ? TEXT("FluidNinja tracking (set by hand)")
+				: Body->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking ? TEXT("NOT TRACKED (needs the modified FluidNinja)")
+				: TEXT("wakes");
+			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test   %-28s %s: water under it %.1f m/s, went %.1f m"), *GetNameSafe(Body->GetOwner()), Route, Water, Distance);
 		}
 		if (Count > 0)
 		{
 			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s), 10 s after the start: water under the floaters %.1f m/s mean, %.1f max; they went %.1f m on average.\n")
 				TEXT("  Reference (this test, demo river): wakes 1.7-1.8 m/s mean, 2.3-2.8 max, 11-15 m; today's FluidNinja tracking (fnb.Buoyancy.Tracking 2)\n")
-				TEXT("  4.7 m/s mean, up to the 6 m/s read limit, 28 m. Relative tracking should land near the wakes. The distance varies by a few metres\n")
+				TEXT("  4.7 m/s mean, up to the 6 m/s read limit, 28 m; no interaction about 1.7 m/s, 12 m. Relative tracking should land near the wakes. The distance varies by a few metres\n")
 				TEXT("  from run to run: judge mainly by the water speed and the roughly twofold gap in distance."),
 				bTestTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"), WaterSum / Count, WaterMax, DistanceSum / Count);
 		}

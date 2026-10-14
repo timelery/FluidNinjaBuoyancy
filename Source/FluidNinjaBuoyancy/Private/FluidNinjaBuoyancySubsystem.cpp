@@ -721,14 +721,16 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 			Primitive->SetGenerateOverlapEvents(Slot.bOverlapBefore);
 			Primitive->UpdateOverlaps();
 			Slot.bHandedOver = false;
-			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: taken back from FluidNinja's tracking; it makes wakes."), *GetNameSafe(Component->GetOwner()));
+			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: taken back from FluidNinja's tracking."), *GetNameSafe(Component->GetOwner()));
 		}
 		if (bWants && !Slot.bHandedOver && !Slot.bTrackingNoted)
 		{
+			// No fallback: this build needs the modified FluidNinja.
 			Slot.bTrackingNoted = true;
-			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: Interaction asks for FluidNinja's tracking, but %s; it makes wakes instead."), *GetNameSafe(Component->GetOwner()),
+			UE_LOG(LogFluidNinjaBuoyancy, Error, TEXT("FluidNinja Buoyancy on %s: not tracked, so it does not stir the water. Its Interaction is FluidNinja's tracking, which needs the modified FluidNinja ")
+				TEXT("(every NinjaLive turning the Relative Tracking Switch '%s' on), but %s."), *GetNameSafe(Component->GetOwner()), *Settings.RelativeTrackingSwitch.ToString(),
 				Ninjas == 0 ? TEXT("there is no NinjaLive") : (Mode == 0 ? TEXT("fnb.Buoyancy.Tracking is 0")
-				: TEXT("FluidNinja paints tracked bodies' world velocity (no NinjaLive turns the Relative Tracking Switch on)")));
+				: TEXT("this FluidNinja paints tracked bodies' world velocity (no NinjaLive turns the switch on)")));
 		}
 		// FluidNinja's tracking needs overlap events, by object type or by tag.
 		Slot.bNinjaTracked = Primitive->GetGenerateOverlapEvents();
@@ -2070,9 +2072,9 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			}
 		}
 		Component->ReceiveContacts(Contacts, Result.Wash, Result.WaterlineLength);
-		if (!bWakes || !Component->bWake || (Slot.bHandedOver && Component->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking))
+		if (!bWakes || !Component->bWake || Component->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking)
 		{
-			continue;   // no wakes, or FluidNinja's own tracking stirs the water for it
+			continue;   // no wakes: FluidNinja's own tracking is its only route into the water
 		}
 		// Each point gives the water a share of what it lacks along the hull's outward normal: the hull's speed there minus the water's
 		// own (read where the point is). FluidNinja adds brush velocity every frame, so this closes on the hull's speed, never past it.

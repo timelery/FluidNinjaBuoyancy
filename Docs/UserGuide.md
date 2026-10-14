@@ -126,13 +126,13 @@ Points to know:
 
 FluidNinja's tracking would suit floating bodies if it painted a pivot's velocity relative to the water at the pivot rather than its world velocity: a body drifting with the current would then paint nothing. FluidNinja doesn't do this yet. [Docs/RelativeTrackingProposal.md](RelativeTrackingProposal.md) proposes the change, with measurements, and explains how to test it.
 
-The plugin is ready for it.
+**This branch (`fluidninja-relative-tracking`) requires that modified FluidNinja.** There is no fallback to the plugin's wakes.
 - **Interaction**, on the component, chooses how the body stirs the simulation:
-  - **Wakes** (the default);
-  - **FluidNinja Tracking**;
-  - **FluidNinja Tracking and Wakes**.
-- **What hand-over does.** A body that asks for tracking is handed over by turning Generate Overlap Events on and adding the NinjaLive's tracking tag, if it has one. It then writes no wakes, unless Interaction is FluidNinja Tracking and Wakes.
-- **When it happens.** Only while every NinjaLive in the level turns on its **Relative Tracking Switch** (project setting below). Otherwise the body makes wakes, and the log says why once. Once a second the plugin checks again, and takes a body back if the switch goes off.
+  - **FluidNinja Tracking** (the default on this branch);
+  - **FluidNinja Tracking and Wakes**;
+  - **Wakes**, chosen explicitly.
+- **What hand-over does.** A body is handed to the tracking by turning Generate Overlap Events on and adding the NinjaLive's tracking tag, if it has one. A FluidNinja Tracking body never writes wakes.
+- **When it happens.** Only while every NinjaLive in the level turns on its **Relative Tracking Switch** (project setting below), which is what the modified FluidNinja provides. Without it, a FluidNinja Tracking body is not tracked and does not stir the water, and the log reports an error for it. Once a second the plugin checks again, and takes a body back if the switch goes off.
 - **A warning.** A body with Generate Overlap Events on that FluidNinja would track with world velocity logs a warning once.
 - **The console.** `fnb.Buoyancy.Tracking` 0 never hands a body over, 1 hands it over when the switch is on (the default), and 2 always does, which reproduces today's runaway for testing.
 - **The demo's test.** `fnb.Demo.RiverTest wakes | tracking` measures how the floaters stir the demo river over 10 s, against reference numbers.
@@ -473,7 +473,7 @@ Results go to:
 | The river | North of the pool, from FluidNinja's river setup: a 45 m lane from its head (west) to a basin (east), 13 m wide, with a 4 m deep channel down the middle between stepped banks. See [the river](#the-river) below. |
 | The player | **FluidNinja Buoyancy Demo Character** (module `FluidNinjaBuoyancyDemo`): the UE5 mannequin (Manny) with the Third Person template's unarmed Animation Blueprint, in `Demo/Characters/Mannequins`, and a third-person camera. It starts on the deck between the pool and the river's head.<br>• Move: WASD or the left stick.<br>• Look: the mouse or the right stick.<br>• Jump: Space or the bottom face button; held while swimming, swim up.<br>It reads the keys directly, so it needs no input mappings in your project. It swims in the water volumes and walks down the steps. It pushes floating bodies it walks into (see [the push](#the-push) below), and its weight presses down on any it stands on. |
 | The ground | Grass out to 150 m around the decks, so the player can walk off them, and so the test bench's walk-away test has somewhere to go. |
-| The floating things | Each a Blueprint in `Demo/Blueprints`, listed below. In the pool: a boat, two beach balls, a ring buoy, a crate and an air mattress. At the river's head: a boat, two crates, three beach balls, a barrel and a ring buoy. The boat, crates and barrel make wakes; the light ones ride the water (Wake off, see [Wakes](#wakes)). None has Generate Overlap Events on (see [Interacting with FluidNinja](#interacting-with-fluidninja)). |
+| The floating things | Each a Blueprint in `Demo/Blueprints`, listed below. In the pool: a boat, two beach balls, a ring buoy, a crate and an air mattress. At the river's head: a boat, two crates, three beach balls, a barrel and a ring buoy. On this branch they all use FluidNinja's tracking (Interaction's default), so they need the modified FluidNinja; see [FluidNinja's own tracking, relative to the water](#fluidninjas-own-tracking-relative-to-the-water). |
 
 | Blueprint | Hull model | Rest draft | Mass | Notes |
 |---|---|---|---|---|
