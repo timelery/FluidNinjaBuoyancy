@@ -33,7 +33,7 @@ A natural place for the change is the `ArrayReader` emitter's Particle Update, b
 4. Keep the result finite: clamp the steps per second (the first frame can have a zero delta time) and the sampled value. `0 × ∞` is NaN, and NaN painted into the painter grid stays there.
 
 Two smaller suggestions:
-- **Where the switch lives.** A property on the NinjaLive actor or its NinjaLive component, for example a bool `TrackVelocityRelativeToWater`, is the safer choice. In our dev copy, every edit to `NinjaLiveCore` that added something stopped the demo river's simulation. That included a system with only a new user parameter and the added modules disabled. We could not isolate the cause; see below.
+- **Where the switch lives.** A property on the NinjaLive actor or its NinjaLive component, for example a bool `TrackVelocityRelativeToWater`, is the safer choice. Our edits to `NinjaLiveCore` stopped the demo river's simulation, and we could not isolate whether a new user parameter alone does; see below.
 - **Per tracked point.** `TrackedParams.w` is read but unused today. Setting it to 1 for physics-simulating primitives would make the change per tracked point, leaving characters, bones and the mouse brush as they are.
 
 A strength factor below 1 is needed: see the measurements below. This plugin's wakes, too, give the water at the hull only 35% of the hull's speed through it, because 100% makes a shallow hull act like a wall through the whole simulated depth.
@@ -42,7 +42,7 @@ A strength factor below 1 is needed: see the measurements below. This plugin's w
 
 We could not prototype the change inside `NinjaLiveCore` reliably, so it was reproduced from outside.
 - **Why not inside.** Editing the asset through UE 5.8's Niagara external-edit API changed the demo river in our dev copy:
-  - every edit that added something (modules in `ArrayReader`, enabled or disabled, or a user parameter) left the river's simulation still, while the pool kept flowing;
+  - every edit we tried added modules to `ArrayReader`, enabled or disabled, with or without a new user parameter, and each left the river's simulation still while the pool kept flowing;
   - a read-only open and re-save through the API slowed the river by about 30% (one run);
   - a plain re-save left it unchanged.
 - **How it was reproduced instead.** FluidNinja draws data-channel points with the same stroke code as tracked pivots, so each floater was written as one data-channel point at its pivot:
@@ -58,11 +58,13 @@ We could not prototype the change inside `NinjaLiveCore` reliably, so it was rep
 | **Relative, strength 0.35** | **mean 1.9 m/s (1.1 to 2.4)** | **mean 15.4 m** |
 
 - **Stock** matches the real tracking above (5.1 m/s, 28 m), which shows the reproduction is faithful.
-- **Relative at strength 0.35** lands exactly where this plugin's wakes do (2.0 m/s, 14.9 m): no runaway, and no local peaks.
+- **Relative at strength 0.35** lands close to this plugin's wakes (2.0 m/s, 14.9 m) in this one run: no runaway, and no local peaks.
 - **A strength below 1 matters.** The water under the pivot is changed by the pivot's own paint, so the subtraction is a feedback loop:
   - at full strength it is marginal (local peaks up to 5.5 m/s under three floaters, though the floaters travel normally);
   - when over-corrected (1.5 × the water) it oscillates into a runaway of its own.
 - **The units are approximate here.** The reproduction also converts FluidNinja's buffer to cm/s with this plugin's formula, which isn't calibrated in this river. Inside FluidNinja the subtraction would be in its own units.
+
+- **A body moved through the water still stirs it.** One run each, with a boat shoved through the pool by the demo character: the water under the boat moved with it at about 1.0 m/s with relative tracking at 0.35, against 0.7 m/s with no interaction and 1.9 m/s with today's tracking. A crate pushed the same way gave no clear result, because the pool's own current dominated it.
 
 So the recommendation is `v_painted = Strength × (v_pivot − v_water)` with Strength around 0.35, rather than the full difference.
 
@@ -77,6 +79,8 @@ The branch (`fluidninja-relative-tracking`) can hand bodies to FluidNinja's trac
 
 To test:
 1. Open the demo level (`FluidNinjaBuoyancy/Demo/Maps/FNB_DemoPool`) and press Play.
-2. Type `fnb.Demo.RiverTest wakes` in the console. After about 15 s the log lists each floater's route, the water under it and how far it went, with the reference numbers. That is the baseline.
-3. Type `fnb.Buoyancy.Tracking 2`, then `fnb.Demo.RiverTest tracking`. Today's FluidNinja paints world velocity: expect about 5 m/s and 28 m.
-4. With your change and the switch on, type `fnb.Buoyancy.Tracking 1`, then `fnb.Demo.RiverTest tracking`. The log should say each floater was handed to FluidNinja's tracking relative to the water. The numbers should land near the wakes: about 2 m/s and 15 m.
+2. Type `fnb.Demo.RiverTest wakes` in the console. After about 15 s the log lists each floater's route, the water under it and how far it went, with the reference numbers. That is the baseline: about 1.7 to 1.8 m/s mean and 11 to 15 m.
+3. Type `fnb.Buoyancy.Tracking 2`, then `fnb.Demo.RiverTest tracking`. Today's FluidNinja paints world velocity: expect about 4.7 m/s mean, up to the 6 m/s limit, and 28 m.
+4. With your change and the switch on, type `fnb.Buoyancy.Tracking 1`, then `fnb.Demo.RiverTest tracking`. The log should say each floater was handed to FluidNinja's tracking relative to the water. The numbers should land near the wakes.
+
+The distance varies by a few metres from run to run. Judge mainly by the water speed and the roughly twofold gap in distance.

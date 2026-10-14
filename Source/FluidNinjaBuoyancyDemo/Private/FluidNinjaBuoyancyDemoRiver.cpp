@@ -329,8 +329,9 @@ void AFluidNinjaBuoyancyDemoRiver::TickTest()
 		if (Count > 0)
 		{
 			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s), 10 s after the start: water under the floaters %.1f m/s mean, %.1f max; they went %.1f m on average.\n")
-				TEXT("  Reference (FluidNinja Buoyancy 1.0.1, demo river): wakes 2.0 m/s mean, 2.8 max, 14.9 m; no interaction 1.7 / 2.4 m/s, 11.8 m;\n")
-				TEXT("  today's FluidNinja tracking (world velocity) 4.9-5.1 m/s mean, up to the 6 m/s read limit, 28 m. Relative tracking should land near the wakes."),
+				TEXT("  Reference (this test, demo river): wakes 1.7-1.8 m/s mean, 2.3-2.8 max, 11-15 m; today's FluidNinja tracking (fnb.Buoyancy.Tracking 2)\n")
+				TEXT("  4.7 m/s mean, up to the 6 m/s read limit, 28 m. Relative tracking should land near the wakes. The distance varies by a few metres\n")
+				TEXT("  from run to run: judge mainly by the water speed and the roughly twofold gap in distance."),
 				bTestTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"), WaterSum / Count, WaterMax, DistanceSum / Count);
 		}
 		ResetRiver();

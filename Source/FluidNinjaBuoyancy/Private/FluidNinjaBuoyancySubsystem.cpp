@@ -574,6 +574,17 @@ UFluidNinjaBuoyancySubsystem::FSlot* UFluidNinjaBuoyancySubsystem::FindSlot(int3
 
 namespace
 {
+	/** A live component of a NinjaLive actor: Blueprint reinstancing can leave unregistered TRASH_ / REINST_ copies behind. */
+	bool IsLiveComponent(const UActorComponent* Component)
+	{
+		if (!Component || !Component->IsRegistered())
+		{
+			return false;
+		}
+		const FString Name = Component->GetName();
+		return !Name.StartsWith(TEXT("TRASH_")) && !Name.StartsWith(TEXT("REINST_"));
+	}
+
 	/** A NinjaLive's say on whether its tracking paints velocity relative to the water: a bool or number property named Switch on the
 	 * actor or a component, or a float user parameter of its simulation; on above 0.5. */
 	bool ReadTrackingSwitch(const AActor& Actor, FName Switch, FString& OutHow)
@@ -581,7 +592,10 @@ namespace
 		TArray<const UObject*> Holders = {&Actor};
 		for (const UActorComponent* Component : Actor.GetComponents())
 		{
-			Holders.Add(Component);
+			if (IsLiveComponent(Component))
+			{
+				Holders.Add(Component);
+			}
 		}
 		for (const UObject* Holder : Holders)
 		{
@@ -600,7 +614,7 @@ namespace
 		const FNiagaraVariable Parameter(FNiagaraTypeDefinition::GetFloatDef(), FName(*(TEXT("User.") + Switch.ToString())));
 		for (const UActorComponent* Component : Actor.GetComponents())
 		{
-			if (const UNiagaraComponent* Simulation = Cast<UNiagaraComponent>(Component))
+			if (const UNiagaraComponent* Simulation = IsLiveComponent(Component) ? Cast<UNiagaraComponent>(Component) : nullptr)
 			{
 				if (Simulation->GetOverrideParameters().IndexOf(Parameter) != INDEX_NONE)
 				{
@@ -634,7 +648,10 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 		TArray<const UObject*> Holders = {*It};
 		for (const UActorComponent* Component : It->GetComponents())
 		{
-			Holders.Add(Component);
+			if (IsLiveComponent(Component))
+			{
+				Holders.Add(Component);
+			}
 		}
 		for (const UObject* Holder : Holders)
 		{
