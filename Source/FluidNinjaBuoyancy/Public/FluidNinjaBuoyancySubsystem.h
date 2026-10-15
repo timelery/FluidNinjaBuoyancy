@@ -9,6 +9,7 @@ class FFluidNinjaBuoyancyCallback;
 class FPhysScene_Chaos;
 class UMaterialInterface;
 class UMaterialParameterCollection;
+class UNiagaraComponent;
 class UNiagaraDataChannelAsset;
 class UPrimitiveComponent;
 class UTextureRenderTarget2D;
@@ -199,6 +200,8 @@ private:
 	{
 		TWeakObjectPtr<UTextureRenderTarget2D> Buffer;
 		TWeakObjectPtr<UObject> Ninja;
+		/** FluidNinja's simulation system (NinjaLiveCore) on the NinjaLive's actor. */
+		TWeakObjectPtr<UNiagaraComponent> Core;
 		TWeakObjectPtr<UMaterialInterface> Material;
 		FBox2D SurfaceArea{ForceInit};
 		float SimSpeed = 1.f;
@@ -208,6 +211,9 @@ private:
 		double SizeCm = 0.0;
 		bool bValid = false;
 		bool bFromMaterial = false;
+		/** The simulation's steps per second: NinjaLiveCore's fixed tick at any frame rate, else SamplingFPS at most the frame rate. */
+		float StepsPerSecond = 0.f;
+		bool bFixedTick = false;
 		float FlowScale = 0.f;   // cm/s per velocity-buffer unit
 	};
 

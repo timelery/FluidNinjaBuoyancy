@@ -25,7 +25,7 @@ FluidNinja LIVE simulates water on the GPU and draws it with a material: a surfa
 | Piece | What it does |
 |---|---|
 | **Surface Mirror** | An orthographic depth capture, looking straight down, of only the water surface's own primitives: the actors carrying a [surface tag](#surface-tags). It draws only the surface pieces under some floating body. Its near plane sits just above the highest body, so water passing higher up (a river over a pool) is left out. A waterfall's face (steeper than 45°) is never drawn. |
-| **Flow sources** | For each FluidNinja simulation that a tagged surface shows, the plugin finds:<br>• its velocity buffer (the surface material's `VelocityDensityBuffer` texture);<br>• its units (the NinjaLive component's `SimSpeed`, `SamplingFPS` and resolution);<br>• where it lies.<br>Location comes from the surface material's `TraceMeshPos` / `TraceMeshSize` when the simulation sets them there (a pool), otherwise from FluidNinja's material parameter collection (a simulation that follows the player, such as the river template). |
+| **Flow sources** | For each FluidNinja simulation that a tagged surface shows, the plugin finds:<br>• its velocity buffer (the surface material's `VelocityDensityBuffer` texture);<br>• its units (the NinjaLive component's `SimSpeed`, `SamplingFPS` and resolution, and the fixed tick of its `NinjaLiveCore` Niagara system);<br>• where it lies.<br>Location comes from the surface material's `TraceMeshPos` / `TraceMeshSize` when the simulation sets them there (a pool), otherwise from FluidNinja's material parameter collection (a simulation that follows the player, such as the river template). |
 | **GPU gather** | One compute pass resamples the capture and each flow source's velocity buffer onto a small grid around every body. One asynchronous readback brings all of them back. Heights are carried forward by their rate of change over the few frames the readback takes. |
 | **Physics callback** | A Chaos sim callback runs on every physics step: each frame, each substep, or each async step. It computes the water's forces on each body at its current pose and applies them. |
 | **Force model** | After Kerner, *Water interaction model for boats in video games* (2015). Every hull triangle is clipped at the water line it actually meets. Each wet piece gets:<br>• hydrostatic pressure, applied at its centre of pressure;<br>• pressure drag, or suction where it pulls away;<br>• skin friction (ITTC 1957 line);<br>• slamming while its wetted area grows.<br>The dry part gets air drag from the wind. Voxel and sphere hulls use the same terms per point. A sphere's drag acts on the part of its section that is under water (a circular segment), and the skin friction on its wetted cap also slows its spin, so a ball rolls along the water rather than spinning in place. |
@@ -68,7 +68,9 @@ The capture square (**Capture Width**, 80 m by default) is centred on the simula
 
 ### The current
 
-The current is read from the texture parameter named in **Velocity Buffer Parameter** (`VelocityDensityBuffer`) on the surface's material. Its speed is computed as: buffer value × `SimSpeed` × cell size × simulation steps per second (`SamplingFPS`, at most the frame rate) × **Flow Scale Multiplier**.
+The current is read from the texture parameter named in **Velocity Buffer Parameter** (`VelocityDensityBuffer`) on the surface's material. Its speed is computed as: buffer value × `SimSpeed` × cell size × simulation steps per second × **Flow Scale Multiplier**.
+
+The simulation steps per second come from FluidNinja's `NinjaLiveCore` Niagara system. It has a fixed tick of 1/60 s, so Niagara steps it 60 times a second at any frame rate (twice a frame at 30 fps), and the current is the same at every frame rate. If `NinjaLiveCore` has no fixed tick, it steps once a frame, and the plugin uses `SamplingFPS`, at most the frame rate. The panel's status shows which one each simulation uses.
 
 To check that the current matches what you see:
 1. In Play, run `fnb.Buoyancy.CalibrateFlow`.
@@ -554,7 +556,7 @@ The test bench panel (`fnb.TestHUD 1`) shows the measured costs: game thread, ph
 
 | Limitation | Detail |
 |---|---|
-| FluidNinja version | The plugin reads FluidNinja by name. If a future FluidNinja release renames these, update the project settings or the plugin:<br>• the `VelocityDensityBuffer`, `TraceMeshPos` and `TraceMeshSize` parameters;<br>• the `SimSpeed`, `SamplingFPS` and `ResolutionX` properties;<br>• the `NinjaDataChannel1_Global` channel and its `Position`, `PositionPrevious` and `VelocityAndSize` attributes. |
+| FluidNinja version | The plugin reads FluidNinja by name. If a future FluidNinja release renames these, update the project settings or the plugin:<br>• the `VelocityDensityBuffer`, `TraceMeshPos` and `TraceMeshSize` parameters;<br>• the `SimSpeed`, `SamplingFPS` and `ResolutionX` properties;<br>• the `NinjaLiveCore` Niagara system (its fixed tick sets the simulation steps per second);<br>• the `NinjaDataChannel1_Global` channel and its `Position`, `PositionPrevious` and `VelocityAndSize` attributes. |
 | A GPU is required | The water is read from a GPU capture. A dedicated server, which does not render, has no live water. Bodies there fall back to water volumes. Multiplayer replication of floating bodies is not handled by the plugin. |
 | Tested setup | Unreal Engine 5.8 on Windows with DirectX 12. Other engine versions need a rebuild and may need code changes. |
 | One capture square | Up to Capture Width wide (80 m by default), centred on the simulation that follows the player, or else on the middle of all the bodies. Bodies farther away use water volumes. |

@@ -31,6 +31,7 @@
 #include "NiagaraDataChannelAccessor.h"
 #include "NiagaraDataChannelAsset.h"
 #include "NiagaraDataChannelFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "PBDRigidsSolver.h"
 #include "Physics/Experimental/PhysScene_Chaos.h"
 #include "PhysicsEngine/BodyInstance.h"
@@ -130,6 +131,8 @@ struct FFluidNinjaBuoyancyFlowProbe
 	float Multiplier = 1.f;
 	float SimSpeed = 1.f;
 	float SamplingFPS = 60.f;
+	/** NinjaLiveCore's fixed tick rate; 0 when it steps once a frame. */
+	float FixedStepsPerSecond = 0.f;
 	bool bApply = false;
 	double Started = 0.0;
 };
@@ -233,6 +236,28 @@ namespace
 			}
 		}
 		return Default;
+	}
+
+	/** FluidNinja's simulation system (NinjaLiveCore) on the actor that owns the NinjaLive component. */
+	UNiagaraComponent* FindNinjaCore(const UObject* Ninja)
+	{
+		const AActor* Owner = Cast<AActor>(Ninja);
+		if (!Owner && Ninja)
+		{
+			Owner = Ninja->GetTypedOuter<AActor>();
+		}
+		if (Owner)
+		{
+			TInlineComponentArray<UNiagaraComponent*> Systems(Owner);
+			for (UNiagaraComponent* System : Systems)
+			{
+				if (System->GetAsset() && System->GetAsset()->GetName() == TEXT("NinjaLiveCore"))
+				{
+					return System;
+				}
+			}
+		}
+		return nullptr;
 	}
 
 	/** Render thread: the copied texels into the arrays (once the GPU is done). */
@@ -665,10 +690,20 @@ void UFluidNinjaBuoyancySubsystem::UpdateFlowSources()
 			Source.SizeCm = SimSizeCm;
 			Source.bValid = true;
 		}
+		// How often it steps: a fixed tick delta on NinjaLiveCore makes Niagara substep it at that rate whatever the frame rate (two
+		// steps a frame at 30 fps for FluidNinja's 1/60 s); without one it steps once a tick, at SamplingFPS at most the frame rate.
+		if (!Source.Core.IsValid())
+		{
+			Source.Core = FindNinjaCore(Source.Ninja.Get());
+		}
+		const UNiagaraComponent* Core = Source.Core.Get();
+		const UNiagaraSystem* System = Core ? Core->GetAsset() : nullptr;
+		Source.bFixedTick = System && System->HasFixedTickDelta() && System->GetFixedTickDeltaTime() > 0.f;
+		Source.StepsPerSecond = Source.bFixedTick ? 1.f / System->GetFixedTickDeltaTime() : FMath::Min(Source.SamplingFPS, FrameRate);
 		const UTextureRenderTarget2D* Buffer = Source.Buffer.Get();
 		const int32 Cells = Source.Resolution > 0 ? Source.Resolution : (Buffer ? Buffer->SizeX : 0);
 		Source.FlowScale = Source.bValid && Buffer && Cells > 0
-			? Source.SimSpeed * static_cast<float>(Source.SizeCm / Cells) * FMath::Min(Source.SamplingFPS, FrameRate) * Multiplier : 0.f;
+			? Source.SimSpeed * static_cast<float>(Source.SizeCm / Cells) * Source.StepsPerSecond * Multiplier : 0.f;
 		if (FlowScale == 0.f)
 		{
 			FlowScale = Source.FlowScale;
@@ -1465,10 +1500,12 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	for (const FFlowSource& Source : FlowSources)
 	{
 		const UTextureRenderTarget2D* Buffer = Source.Buffer.Get();
-		Sims += FString::Printf(TEXT("\n  sim %s: %s centre (%.0f, %.0f) size %.0f m, SimSpeed %.2f, %.0f samples/s, %d cells -> flow %.0f cm/s per unit"),
+		Sims += FString::Printf(TEXT("\n  sim %s: %s centre (%.0f, %.0f) size %.0f m, SimSpeed %.2f, %.0f steps/s (%s), %d cells -> flow %.0f cm/s per unit"),
 			Source.Ninja.IsValid() && Source.Ninja->GetOuter() ? *Source.Ninja->GetOuter()->GetName() : TEXT("?"),
 			Source.bValid ? (Source.bFromMaterial ? TEXT("material,") : TEXT("collection,")) : TEXT("NOT PLACED,"), Source.Centre.X, Source.Centre.Y,
-			Source.SizeCm / 100.0, Source.SimSpeed, Source.SamplingFPS, Source.Resolution > 0 ? Source.Resolution : (Buffer ? Buffer->SizeX : 0), Source.FlowScale);
+			Source.SizeCm / 100.0, Source.SimSpeed, Source.StepsPerSecond,
+			Source.bFixedTick ? TEXT("NinjaLiveCore fixed tick") : *FString::Printf(TEXT("SamplingFPS %.0f, at most the frame rate"), Source.SamplingFPS),
+			Source.Resolution > 0 ? Source.Resolution : (Buffer ? Buffer->SizeX : 0), Source.FlowScale);
 	}
 	if (Sims.IsEmpty())
 	{
@@ -2217,6 +2254,7 @@ void UFluidNinjaBuoyancySubsystem::CalibrateFlowAt(const FVector& Where, bool bA
 		Probe->Multiplier = UFluidNinjaBuoyancySettings::Get().FlowScaleMultiplier;
 		Probe->SimSpeed = Source->SimSpeed;
 		Probe->SamplingFPS = Source->SamplingFPS;
+		Probe->FixedStepsPerSecond = Source->bFixedTick ? Source->StepsPerSecond : 0.f;
 		Probe->bApply = bApply;
 		Probe->Started = FPlatformTime::Seconds();
 		FlowProbe = Probe;
@@ -2458,7 +2496,8 @@ void UFluidNinjaBuoyancySubsystem::UpdateFlowProbe()
 	const double FrameSeconds = ElapsedSum / Pairs / Gap;
 	const double CellsPerFrame = ShiftDotVelocity / VelocityDotVelocity / Gap;      // per buffer unit
 	const double MeasuredPerUnit = SpeedDotVelocity / VelocityDotVelocity;          // cm/s per buffer unit
-	const double Cycles = FMath::Min(static_cast<double>(Probe.SamplingFPS), 1.0 / FrameSeconds);
+	const double Cycles = Probe.FixedStepsPerSecond > 0.f ? static_cast<double>(Probe.FixedStepsPerSecond)
+		: FMath::Min(static_cast<double>(Probe.SamplingFPS), 1.0 / FrameSeconds);   // simulation steps per second, as UpdateFlowSources
 	const double ModelPerUnit = Probe.SimSpeed * Cell * Cycles;                    // without the multiplier
 	const double ModelCellsPerFrame = Probe.SimSpeed * Cycles * FrameSeconds;
 	const double Suggested = ModelPerUnit > 0.0 ? MeasuredPerUnit / ModelPerUnit : 0.0;
@@ -2477,9 +2516,10 @@ void UFluidNinjaBuoyancySubsystem::UpdateFlowProbe()
 	else if (Suggested <= 0.05 || Suggested >= 20.0) { Why = TEXT("implausible result"); }
 	const bool bGood = Why.IsEmpty();
 	FString Report = FString::Printf(TEXT("Flow calibration (%s, %d of %d matches, correlation %.2f, direction agreement %.2f, moved %.1f texels in %d frames, axes u %.2f v %.2f cells/frame per unit): ")
-		TEXT("moves %.2f cells a frame per buffer unit (model %.2f) at %.0f fps = %.0f cm/s per unit (model %.0f). Flow Scale Multiplier %.2f matches it (now %.2f)"),
+		TEXT("moves %.2f cells a frame per buffer unit (model %.2f) at %.0f fps, %.0f simulation steps/s%s = %.0f cm/s per unit (model %.0f). Flow Scale Multiplier %.2f matches it (now %.2f)"),
 		TracerName, Matches, Tried, ScoreSum / Matches, Agreement, MeanShift, Gap, RatioU, RatioV,
-		CellsPerFrame, ModelCellsPerFrame, 1.0 / FrameSeconds, MeasuredPerUnit, ModelPerUnit, Suggested, Probe.Multiplier);
+		CellsPerFrame, ModelCellsPerFrame, 1.0 / FrameSeconds, Cycles, Probe.FixedStepsPerSecond > 0.f ? TEXT(" (NinjaLiveCore fixed tick)") : TEXT(""),
+		MeasuredPerUnit, ModelPerUnit, Suggested, Probe.Multiplier);
 	if (!bGood)
 	{
 		Report += FString::Printf(TEXT("; NOT TRUSTED: %s"), *Why);

@@ -78,8 +78,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Surface Mirror", meta = (ClampMin = "0", ClampMax = "0.5", Units = "s"))
 	float MaxExtrapolationSeconds = 0.08f;
 
-	/** The current (cm/s) is the velocity buffer × SimSpeed × cell size × simulation cycles per second (FluidNinja's SamplingFPS,
-	 * at most the frame rate) × this. */
+	/** The current (cm/s) is the velocity buffer × SimSpeed × cell size × simulation steps per second × this. The steps per second
+	 * are the fixed tick of FluidNinja's NinjaLiveCore system (1/60 s: 60 steps a second at any frame rate); a NinjaLiveCore without
+	 * a fixed tick steps at FluidNinja's SamplingFPS, at most the frame rate. */
 	UPROPERTY(config, EditAnywhere, Category = "Flow", meta = (ClampMin = "0"))
 	float FlowScaleMultiplier = 1.f;
 
