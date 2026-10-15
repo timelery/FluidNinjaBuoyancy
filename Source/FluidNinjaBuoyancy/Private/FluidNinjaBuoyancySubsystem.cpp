@@ -694,6 +694,23 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 	{
 		return;
 	}
+	// Nothing to decide while no body asks for FluidNinja's tracking, is handed over, or generates overlap events itself (the warning
+	// below): skip the walk over every actor in the world (Main has thousands), which would otherwise run every second for nothing.
+	const bool bNeeded = Slots.ContainsByPredicate([](const FSlot& Slot)
+		{
+			const UFluidNinjaBuoyancyComponent* Component = Slot.Component.Get();
+			const UPrimitiveComponent* Primitive = Component ? Component->GetSimulatedPrimitive() : nullptr;
+			return Primitive && (Component->Interaction != EFluidNinjaBuoyancyInteraction::Wakes || Slot.bHandedOver || Primitive->GetGenerateOverlapEvents());
+		});
+	if (!bNeeded)
+	{
+		for (FSlot& Slot : Slots)
+		{
+			Slot.bNinjaTracked = false;
+		}
+		TrackingReport = TEXT("not checked: no body asks for FluidNinja's tracking or generates overlap events\n");
+		return;
+	}
 	// The NinjaLive actors: the tag each tracks, whether each paints tracked velocity relative to the water, and whether it leaves
 	// tracked bodies' density out (FluidNinja weights each tick's push of its river driver and brushes by the local density, so
 	// painted density makes the current push harder wherever floaters have been).
