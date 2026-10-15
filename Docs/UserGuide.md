@@ -124,7 +124,7 @@ Points to know:
 
 ### FluidNinja's own tracking, relative to the water
 
-FluidNinja's tracking would suit floating bodies if it painted a pivot's velocity relative to the water at the pivot rather than its world velocity, and no density. A body drifting with the current would then paint nothing. FluidNinja already has the density half: **Selectively Kill Brush Density Keep Velocity** on the NinjaLive component, set to 1 (ARRAY), lets tracked primitives stir the water without painting density. Painted density is fluid that carries the current, so it is most of what a tracked floater adds to a current. The velocity half is not in FluidNinja yet. [Docs/RelativeTrackingProposal.md](RelativeTrackingProposal.md) proposes it (a `NinjaLiveCore` change we prototyped), with measurements, and explains how to test it.
+FluidNinja's tracking would suit floating bodies if it painted a pivot's velocity relative to the water at the pivot rather than its world velocity, and no density. A body drifting with the current would then paint no velocity of its own. FluidNinja already has the density half: **Selectively Kill Brush Density Keep Velocity** on the NinjaLive component, set to 1 (ARRAY), lets tracked primitives stir the water without painting density. FluidNinja weights each tick's push on the water (its river driver and its brushes) by the local density, so painted density makes the river push harder where floaters go. In the demo river, switching it on removes most of what tracked floaters add to the current (the switch also weakens the velocity the brush paints, so the two are not fully separated). The velocity half is not in FluidNinja yet. [Docs/RelativeTrackingProposal.md](RelativeTrackingProposal.md) proposes it (a `NinjaLiveCore` change we prototyped), with measurements, and explains how to test it.
 
 **This branch (`fluidninja-relative-tracking`) requires that modified FluidNinja.** There is no fallback to the plugin's wakes.
 - **Interaction**, on the component, chooses how the body stirs the simulation:
@@ -134,11 +134,11 @@ FluidNinja's tracking would suit floating bodies if it painted a pivot's velocit
 - **What hand-over does.** A body is handed to the tracking by turning Generate Overlap Events on and adding the NinjaLive's tracking tag, if it has one. A FluidNinja Tracking body never writes wakes.
 - **When it happens.** Only while every NinjaLive in the level does both:
   - turns on its **Relative Tracking Switch** (project setting below), which is what the modified FluidNinja provides: the user parameter `TrackVelocityRelativeToWater` on its NinjaLiveComponent, set to 1;
-  - sets its **Tracked Density Switch** (project setting below), FluidNinja's **Selectively Kill Brush Density Keep Velocity**, to 1, 4 or 5. FluidNinja reads it when the simulation starts, so set it in the level, not during play. 5 (ALL) also takes the density out of this plugin's wakes.
+  - sets its **Tracked Density Switch** (project setting below), FluidNinja's **Selectively Kill Brush Density Keep Velocity**, to 1, 4 or 5. Set it on the NinjaLive in the level; changing it during play was not tested. 5 (ALL) also takes the density out of this plugin's wakes.
 
   Otherwise a FluidNinja Tracking body is not tracked and does not stir the water, and the log reports an error naming everything that is missing (again whenever that changes). Once a second the plugin checks again, and takes a body back if the switch goes off.
 - **A warning.** A body with Generate Overlap Events on that FluidNinja would track with world velocity or density logs a warning once.
-- **The console.** `fnb.Buoyancy.Tracking` 0 never hands a body over, 1 hands it over when both are set (the default), and 2 always does, which reproduces today's runaway for testing.
+- **The console.** `fnb.Buoyancy.Tracking` 0 never hands a body over, 1 hands it over when both are set (the default), and 2 always does, for testing. FluidNinja still paints what the NinjaLive settings say, so to reproduce today's runaway also set both back to 0 in the level before Play. The console variable keeps its value until the editor closes.
 - **The demo's test.** `fnb.Demo.RiverTest wakes | tracking` measures how the floaters stir the demo river over 10 s, against reference numbers.
 
 ---
@@ -335,7 +335,7 @@ A piece drives into the water in two ways. Moving sideways, it pushes at its spe
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Interaction | Wakes | Wakes, FluidNinja Tracking, or both. FluidNinja's tracking is used only while FluidNinja tracks relative to the water; see [FluidNinja's own tracking, relative to the water](#fluidninjas-own-tracking-relative-to-the-water). |
+| Interaction | FluidNinja Tracking (this branch) | Wakes, FluidNinja Tracking, or both. FluidNinja's tracking is used only while every NinjaLive tracks relative to the water and paints no density for tracked bodies; see [FluidNinja's own tracking, relative to the water](#fluidninjas-own-tracking-relative-to-the-water). |
 | Wake Brush Size | 60 cm | The brush size at a push of 2 m/s, scaled 0.4–2× with the push. |
 | Wake Min Push | 20 cm/s | Slower pieces leave no wake (sideways and sinking speed together), so a body bobbing gently at rest stays quiet. |
 | Wake Strength | 0.35 | How much of the hull's speed through the water the water at the hull takes on. 1 would make it a wall. A hull stirs only the water near the surface. |
@@ -388,7 +388,7 @@ Light bodies fail without Stable Steps even at 120 Hz: the drag on a large, ligh
 |---|---|
 | `fnb.Buoyancy 0/1/2` | Off, on, or on with the debug view (the water line, forces and the water read back). |
 | `fnb.Buoyancy.Wake 0/1` | Wakes off or on (A/B). |
-| `fnb.Buoyancy.Tracking 0/1/2` | Bodies whose Interaction asks for FluidNinja's tracking: 0 never, 1 when FluidNinja tracks relative to the water, 2 always (reproduces today's runaway). |
+| `fnb.Buoyancy.Tracking 0/1/2` | Bodies whose Interaction asks for FluidNinja's tracking: 0 never, 1 (the default) when every NinjaLive turns its Relative Tracking Switch on and sets its Tracked Density Switch to 1, 4 or 5, 2 always, for testing (with both NinjaLive settings at 0, FluidNinja then paints their world velocity and density: today's runaway). |
 | `fnb.Demo.RiverTest wakes \| tracking` | Demo level: how the floaters stir the river over 10 s, against reference numbers. |
 | `fnb.Buoyancy.Gather 0/1` | Per-body readbacks or the GPU gather (A/B). |
 | `fnb.Buoyancy.Implicit 0/1` | Stable steps off or on (A/B). |

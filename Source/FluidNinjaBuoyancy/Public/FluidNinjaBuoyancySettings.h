@@ -138,9 +138,9 @@ public:
 	/** How a NinjaLive says tracked bodies paint velocity but no density: FluidNinja's Selectively Kill Brush Density Keep Velocity,
 	 * a number property of this name on the NinjaLive actor or one of its components, or an int user parameter of its simulation
 	 * (User.Painter.<name> or User.<name>). 1 (ARRAY: primitives and bones), 4 (ARRAY and CHAOS) and 5 (ALL) count; 5 also takes the
-	 * density out of this plugin's wakes, which are data-channel points. FluidNinja keeps painted density as fluid that carries the
-	 * current, so a tracked floater that paints density speeds the current up even when its velocity is taken relative to the water.
-	 * FluidNinja reads the value when its simulation starts, so set it in the level, not during play. */
+	 * density out of this plugin's wakes, which are data-channel points. FluidNinja weights each tick's push of its river driver and
+	 * brushes by the local density, so a tracked floater that paints density makes the current push harder along its path, even when
+	 * its velocity is taken relative to the water. Set it on the NinjaLive in the level; changing it during play was not tested. */
 	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
 	FName TrackedDensitySwitch = TEXT("SelectivelyKillBrushDensityKeepVelocity");
 

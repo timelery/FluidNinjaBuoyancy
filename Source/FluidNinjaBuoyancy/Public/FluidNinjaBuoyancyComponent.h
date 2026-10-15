@@ -31,10 +31,11 @@ enum class EFluidNinjaBuoyancyInteraction : uint8
 	/** The plugin's wakes: water-line points in FluidNinja's data channel, written only where the hull moves through the water. */
 	Wakes,
 	/** FluidNinja's own tracking of the body's pivot, relative to the water: the body generates overlap events, carries the
-	 * NinjaLive's tracking tag and writes no wakes. This needs the modified FluidNinja (its NinjaLive turning the Relative Tracking
-	 * Switch on). Without it the body is not tracked and does not stir the water, and the log says so. */
+	 * NinjaLive's tracking tag and writes no wakes. This needs the modified FluidNinja: every NinjaLive turning the Relative Tracking
+	 * Switch on and setting its Tracked Density Switch (FluidNinja's Selectively Kill Brush Density Keep Velocity) to 1, 4 or 5, so
+	 * tracked bodies paint no density. Without both the body is not tracked and does not stir the water, and the log says so. */
 	FluidNinjaTracking UMETA(DisplayName = "FluidNinja Tracking"),
-	/** FluidNinja's tracking (same requirement) and the plugin's wakes as well. */
+	/** FluidNinja's tracking (same two requirements) and the plugin's wakes as well. */
 	Both UMETA(DisplayName = "FluidNinja Tracking and Wakes"),
 };
 
@@ -310,7 +311,8 @@ public:
 	/** How the body stirs the simulation: FluidNinja's own tracking relative to the water (the default on this branch, which needs the
 	 * modified FluidNinja: Project Settings → FluidNinja Buoyancy → FluidNinja Tracking; console fnb.Buoyancy.Tracking), or the
 	 * plugin's wakes. FluidNinja's tracking as it is today paints a body's world velocity, and a floater carried by a current then
-	 * speeds that current up, so a body is handed to it only when every NinjaLive says it tracks relative to the water. */
+	 * speeds that current up, so a body is handed to it only when every NinjaLive says it tracks relative to the water and paints no
+	 * density for tracked bodies (Tracked Density Switch 1, 4 or 5). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake")
 	EFluidNinjaBuoyancyInteraction Interaction = EFluidNinjaBuoyancyInteraction::FluidNinjaTracking;
 
