@@ -99,13 +99,13 @@ Three assets change: `Core/Functions/PainterSourceData`, `Core/Modules/Ninja_Pai
 
 The demo river test, 10 s after the river starts:
 
-| | Fixed 60 fps | Fixed 45 fps * | Fixed 30 fps * | Fixed 20 fps * | Unfixed (about 60 fps) |
-|---|---|---|---|---|---|
-| No interaction | 14.8 m, 1.9 m/s | 14.4 m, 1.7 m/s | 15.1 m, 1.6 m/s | 9.9 m, 2.2 m/s | 15.1 m, 1.8 m/s |
-| Today's tracking, density off | 14.6 m, 2.4 m/s | 14.6 m, 2.4 m/s | 15.4 m, 2.4 m/s | 9.7 m, 2.6 m/s | 15.0 m, 2.3 m/s |
-| **Relative tracking, density off** | **13.7 m, 1.9 m/s** | **13.5 m, 1.9 m/s** | **14.1 m, 1.8 m/s** | **8.9 m, 1.7 m/s** | **14.2 m, 2.0 m/s** |
+| | Fixed 60 fps | Fixed 45 fps | Fixed 30 fps | Unfixed (about 60 fps) |
+|---|---|---|---|---|
+| No interaction | 14.8 m, 1.9 m/s | 14.4 m, 1.7 m/s | 15.2 m, 1.8 m/s | 15.1 m, 1.8 m/s |
+| Today's tracking, density off | 14.6 m, 2.4 m/s | 14.5 m, 2.5 m/s | 15.4 m, 2.4 m/s | 15.0 m, 2.3 m/s |
+| **Relative tracking, density off** | **13.7 m, 1.9 m/s** | **13.4 m, 1.9 m/s** | **14.1 m, 1.8 m/s** | **14.2 m, 2.0 m/s** |
 
-\* For these runs **Flow Scale Multiplier** (Project Settings → FluidNinja Buoyancy) was set to 60 / frame rate: 1.3333 at 45 fps, 2 at 30 fps, 3 at 20 fps. Without it, this branch's flow scale assumes `min(SamplingFPS, frame rate)` simulation steps a second, so at 30 fps it reads and applies half the real current. 45 fps gives the uneven case (one or two simulation ticks a frame), 20 fps three ticks a frame. At 20 fps the floaters go less far for about the same water speed, so compare within a column.
+At every frame rate the plugin reads the current at FluidNinja's 60 simulation steps a second. 45 fps gives the uneven case (one or two simulation ticks a frame), 30 fps two ticks every frame.
 
 Other checks:
 - **With no interaction, the river is unchanged.** The plain river run (floaters present, `fnb.Buoyancy.Tracking 0` so none is handed over) with the switch on and density off: 14.8 m and 1.9 m/s at fixed 60 fps, the same as with neither setting.
@@ -132,7 +132,7 @@ To test:
 2. With Play stopped, on each NinjaLive actor, select its **NinjaLiveComponent**:
    - set **Selectively Kill Brush Density Keep Velocity** to 1;
    - under **User Parameters**, set `TrackVelocityRelativeToWater` to 1.
-3. Press Play and check `stat fps`. The numbers here are at 60 fps. This branch doesn't have this plugin's flow-scale fix (commit `f3e0249` on `main`), so below 60 fps it reads the current too low (half at 30 fps). Either set **Flow Scale Multiplier** (Project Settings → FluidNinja Buoyancy) to 60 / frame rate for the test and back to 1 afterwards, or run the level standalone with `-game -UseFixedTimeStep -FPS=60`. The first run after the core change may still be compiling shaders: run each test twice and use the second.
+3. Press Play and check `stat fps`: compare with the table's column nearest that frame rate. The first run after the core change may still be compiling shaders: run each test twice and use the second.
 4. Type `fnb.Demo.RiverTest wakes` in the console. After about 15 s the log lists each floater's route, the water under it and how far it went: the baseline.
 5. Type `fnb.Demo.RiverTest tracking`. The test's report should list each NinjaLive as painting tracked velocity relative to the water, with no density, and each floater's route as `FluidNinja tracking`. The numbers should land near no interaction (the tables above). The "handed to FluidNinja's own tracking (relative to the water, no density)" lines come earlier in the log: at Play start, and about a second after step 4's test ends.
 6. For today's behaviour, stop Play, set both settings back to 0 on each NinjaLiveComponent, press Play, type `fnb.Buoyancy.Tracking 2` and run `fnb.Demo.RiverTest tracking` again: about 28 m and 4.8 m/s. Afterwards type `fnb.Buoyancy.Tracking 1`: the console variable keeps its value until the editor closes.

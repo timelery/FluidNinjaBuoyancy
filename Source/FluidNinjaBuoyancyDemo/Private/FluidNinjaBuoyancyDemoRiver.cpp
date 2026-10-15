@@ -335,8 +335,7 @@ void AFluidNinjaBuoyancyDemoRiver::TickTest()
 			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s), 10 s after the start: water under the floaters %.1f m/s mean, %.1f max; they went %.1f m on average.\n")
 				TEXT("  Reference (this test, demo river, 60 fps): no interaction 1.9 m/s mean, 15 m; wakes the same; today's FluidNinja tracking (fnb.Buoyancy.Tracking 2,\n")
 				TEXT("  both NinjaLive settings at 0) 4.8 m/s mean, up to the 6 m/s read limit, 28 m; with no tracked density only 2.4 m/s, 15 m; relative tracking with no\n")
-				TEXT("  tracked density 2.0 m/s, 14 m. The distance varies by a metre or two from run to run: judge mainly by the water speed. Below 60 fps this branch reads\n")
-				TEXT("  the current too low: set Flow Scale Multiplier to 60 / frame rate, or run at a fixed 60 fps."),
+				TEXT("  tracked density 2.0 m/s, 14 m. The distance varies by a metre or two from run to run: judge mainly by the water speed."),
 				bTestTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"), WaterSum / Count, WaterMax, DistanceSum / Count);
 		}
 		ResetRiver();
