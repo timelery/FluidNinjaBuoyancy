@@ -124,7 +124,7 @@ Points to know:
 
 ### FluidNinja's own tracking, relative to the water
 
-FluidNinja's tracking would suit floating bodies if it painted a pivot's velocity relative to the water at the pivot rather than its world velocity: a body drifting with the current would then paint nothing. FluidNinja doesn't do this yet. [Docs/RelativeTrackingProposal.md](RelativeTrackingProposal.md) proposes the change, with measurements, and explains how to test it.
+FluidNinja's tracking would suit floating bodies if it painted a pivot's velocity relative to the water at the pivot rather than its world velocity, and no density. A body drifting with the current would then paint nothing. FluidNinja already has the density half: **Selectively Kill Brush Density Keep Velocity** on the NinjaLive component, set to 1 (ARRAY), lets tracked primitives stir the water without painting density. Painted density is fluid that carries the current, so it is most of what a tracked floater adds to a current. The velocity half is not in FluidNinja yet. [Docs/RelativeTrackingProposal.md](RelativeTrackingProposal.md) proposes it (a `NinjaLiveCore` change we prototyped), with measurements, and explains how to test it.
 
 **This branch (`fluidninja-relative-tracking`) requires that modified FluidNinja.** There is no fallback to the plugin's wakes.
 - **Interaction**, on the component, chooses how the body stirs the simulation:
@@ -132,9 +132,13 @@ FluidNinja's tracking would suit floating bodies if it painted a pivot's velocit
   - **FluidNinja Tracking and Wakes**;
   - **Wakes**, chosen explicitly.
 - **What hand-over does.** A body is handed to the tracking by turning Generate Overlap Events on and adding the NinjaLive's tracking tag, if it has one. A FluidNinja Tracking body never writes wakes.
-- **When it happens.** Only while every NinjaLive in the level turns on its **Relative Tracking Switch** (project setting below), which is what the modified FluidNinja provides. Without it, a FluidNinja Tracking body is not tracked and does not stir the water, and the log reports an error for it. Once a second the plugin checks again, and takes a body back if the switch goes off.
-- **A warning.** A body with Generate Overlap Events on that FluidNinja would track with world velocity logs a warning once.
-- **The console.** `fnb.Buoyancy.Tracking` 0 never hands a body over, 1 hands it over when the switch is on (the default), and 2 always does, which reproduces today's runaway for testing.
+- **When it happens.** Only while every NinjaLive in the level does both:
+  - turns on its **Relative Tracking Switch** (project setting below), which is what the modified FluidNinja provides: the user parameter `TrackVelocityRelativeToWater` on its NinjaLiveComponent, set to 1;
+  - sets its **Tracked Density Switch** (project setting below), FluidNinja's **Selectively Kill Brush Density Keep Velocity**, to 1, 4 or 5. FluidNinja reads it when the simulation starts, so set it in the level, not during play. 5 (ALL) also takes the density out of this plugin's wakes.
+
+  Otherwise a FluidNinja Tracking body is not tracked and does not stir the water, and the log reports an error naming everything that is missing (again whenever that changes). Once a second the plugin checks again, and takes a body back if the switch goes off.
+- **A warning.** A body with Generate Overlap Events on that FluidNinja would track with world velocity or density logs a warning once.
+- **The console.** `fnb.Buoyancy.Tracking` 0 never hands a body over, 1 hands it over when both are set (the default), and 2 always does, which reproduces today's runaway for testing.
 - **The demo's test.** `fnb.Demo.RiverTest wakes | tracking` measures how the floaters stir the demo river over 10 s, against reference numbers.
 
 ---
@@ -242,6 +246,7 @@ All settings are under **Project Settings → Game → FluidNinja Buoyancy** and
 | Wake | Wakes / Wake Data Channel / Max Wake Points | on / `NinjaDataChannel1_Global` / 256 | See [Wakes](#wakes). |
 | FluidNinja Tracking | Tracking Tag Property | `TrackActorPrimitiveComponentsWithTag` | The NinjaLive property (actor or component) naming the tag it tracks. A body handed over gets that tag. |
 | | Relative Tracking Switch | `TrackVelocityRelativeToWater` | How a NinjaLive says it tracks relative to the water: a bool or number property of this name on the actor or a component, or a float user parameter; on above 0.5. See [FluidNinja's own tracking, relative to the water](#fluidninjas-own-tracking-relative-to-the-water). |
+| | Tracked Density Switch | `SelectivelyKillBrushDensityKeepVelocity` | How a NinjaLive says tracked bodies paint no density: a number property of this name on the actor or a component, or an int user parameter (`User.Painter.<name>` or `User.<name>`); 1, 4 or 5 count. FluidNinja's Selectively Kill Brush Density Keep Velocity. |
 | Effects | Splash System | `NS_FNB_HullSplash` | Default spray. |
 | | Slap / Wash / Creak Sound | none | Default hull sounds. See [Hull sounds](#hull-sounds). |
 | | Hull Attenuation | `SA_FNB_Hull` | Default attenuation for hull sounds. |

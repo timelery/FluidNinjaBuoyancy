@@ -26,8 +26,8 @@ namespace FluidNinjaBuoyancyCVars
 
 	static FAutoConsoleVariableRef CVarTracking(TEXT("fnb.Buoyancy.Tracking"), Tracking,
 		TEXT("Bodies whose Interaction is FluidNinja's tracking: 0 never handed to it (they do not stir the water), 1 handed to it while every NinjaLive ")
-		TEXT("paints tracked velocity relative to the water (Project Settings → FluidNinja Buoyancy → FluidNinja Tracking), 2 always, for testing: ")
-		TEXT("today's FluidNinja then paints their world velocity, which speeds a current up."));
+		TEXT("paints tracked velocity relative to the water and no density for them (Project Settings → FluidNinja Buoyancy → FluidNinja Tracking), 2 always, ")
+		TEXT("for testing: today's FluidNinja then paints their world velocity and density, which speeds a current up."));
 	static FAutoConsoleVariableRef CVarEnable(TEXT("fnb.Buoyancy"), Enable,
 		TEXT("Buoyancy on FluidNinja water (Project Settings → Game → FluidNinja Buoyancy). 0 off, 1 on, 2 on with the debug view (water line, forces, the water read back)."));
 	static FAutoConsoleVariableRef CVarThrottle(TEXT("fnb.Boat.Throttle"), BoatThrottle,

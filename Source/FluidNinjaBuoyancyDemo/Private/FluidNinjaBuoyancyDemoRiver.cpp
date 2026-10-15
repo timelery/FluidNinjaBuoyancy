@@ -81,8 +81,8 @@ namespace
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs RiverTestCommand(TEXT("fnb.Demo.RiverTest"),
-		TEXT("How the floaters stir the demo river, measured over 10 s of flow: wakes (default) | tracking (FluidNinja's own tracking, when FluidNinja ")
-		TEXT("paints tracked velocity relative to the water; fnb.Buoyancy.Tracking 2 forces today's world-velocity tracking)."),
+		TEXT("How the floaters stir the demo river, measured over 10 s of flow: wakes (default) | tracking (FluidNinja's own tracking, when every NinjaLive ")
+		TEXT("paints tracked velocity relative to the water and no density for them; fnb.Buoyancy.Tracking 2 forces today's world-velocity tracking)."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 			{
 				if (AFluidNinjaBuoyancyDemoRiver* River = FindRiver(World))
@@ -325,16 +325,16 @@ void AFluidNinjaBuoyancyDemoRiver::TickTest()
 			++Count;
 			const TCHAR* Route = bHandedOver ? TEXT("FluidNinja tracking")
 				: bTracked ? TEXT("FluidNinja tracking (set by hand)")
-				: Body->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking ? TEXT("NOT TRACKED (needs the modified FluidNinja)")
+				: Body->Interaction == EFluidNinjaBuoyancyInteraction::FluidNinjaTracking ? TEXT("NOT TRACKED (needs the modified FluidNinja's switch and no tracked density; see the log)")
 				: TEXT("wakes");
 			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test   %-28s %s: water under it %.1f m/s, went %.1f m"), *GetNameSafe(Body->GetOwner()), Route, Water, Distance);
 		}
 		if (Count > 0)
 		{
 			UE_LOG(LogFluidNinjaBuoyancyDemo, Display, TEXT("River test (%s), 10 s after the start: water under the floaters %.1f m/s mean, %.1f max; they went %.1f m on average.\n")
-				TEXT("  Reference (this test, demo river): wakes 1.7-1.8 m/s mean, 2.3-2.8 max, 11-15 m; today's FluidNinja tracking (fnb.Buoyancy.Tracking 2)\n")
-				TEXT("  4.7 m/s mean, up to the 6 m/s read limit, 28 m; no interaction about 1.7 m/s, 12 m. Relative tracking should land near the wakes. The distance varies by a few metres\n")
-				TEXT("  from run to run: judge mainly by the water speed and the roughly twofold gap in distance."),
+				TEXT("  Reference (this test, demo river, 60 fps): no interaction 1.9 m/s mean, 15 m; wakes the same; today's FluidNinja tracking (fnb.Buoyancy.Tracking 2)\n")
+				TEXT("  4.8 m/s mean, up to the 6 m/s read limit, 28 m; with no tracked density 2.4 m/s, 15 m; relative tracking with no tracked density 2.0 m/s, 14 m.\n")
+				TEXT("  The distance varies by a metre or two from run to run: judge mainly by the water speed. Below 60 fps this plugin reads the current too low (flow scale)."),
 				bTestTracking ? TEXT("FluidNinja tracking") : TEXT("wakes"), WaterSum / Count, WaterMax, DistanceSum / Count);
 		}
 		ResetRiver();

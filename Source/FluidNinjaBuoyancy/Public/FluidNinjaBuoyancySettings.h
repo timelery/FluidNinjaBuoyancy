@@ -131,9 +131,18 @@ public:
 	 * makes a current speed itself up around floating bodies): a bool or number property of this name on the NinjaLive actor or one
 	 * of its components, or a float user parameter of its simulation; on above 0.5. FluidNinja does not have this yet; the name is
 	 * the proposal (see the user guide, "FluidNinja's own tracking"). Bodies are handed to the tracking only while every NinjaLive in
-	 * the level says so. Console: fnb.Buoyancy.Tracking. */
+	 * the level says so, and also paints no density for them (Tracked Density Switch). Console: fnb.Buoyancy.Tracking. */
 	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
 	FName RelativeTrackingSwitch = TEXT("TrackVelocityRelativeToWater");
+
+	/** How a NinjaLive says tracked bodies paint velocity but no density: FluidNinja's Selectively Kill Brush Density Keep Velocity,
+	 * a number property of this name on the NinjaLive actor or one of its components, or an int user parameter of its simulation
+	 * (User.Painter.<name> or User.<name>). 1 (ARRAY: primitives and bones), 4 (ARRAY and CHAOS) and 5 (ALL) count; 5 also takes the
+	 * density out of this plugin's wakes, which are data-channel points. FluidNinja keeps painted density as fluid that carries the
+	 * current, so a tracked floater that paints density speeds the current up even when its velocity is taken relative to the water.
+	 * FluidNinja reads the value when its simulation starts, so set it in the level, not during play. */
+	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
+	FName TrackedDensitySwitch = TEXT("SelectivelyKillBrushDensityKeepVelocity");
 
 	/** Defaults for bodies that set none of their own. The spray is spawned where a hull slams into the water or drives hard into
 	 * it, scaled by how hard; any Niagara system works. */

@@ -197,7 +197,8 @@ private:
 		bool bOverlapBefore = false;
 		TArray<FName> AddedTags;
 		bool bTrackingWarned = false;
-		bool bTrackingNoted = false;
+		/** Why the body was last reported as not handed over (logged again when the reason changes). */
+		FString TrackingNote;
 	};
 
 	/** A body the capture serves this frame, the square of water it needs, and the simulation whose current it reads. */
