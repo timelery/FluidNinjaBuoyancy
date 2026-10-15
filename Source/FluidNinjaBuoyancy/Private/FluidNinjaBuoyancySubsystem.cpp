@@ -767,7 +767,14 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 	// painted density makes the current push harder wherever floaters have been).
 	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
 	TArray<FName> Tags;
-	TArray<ECollisionChannel> TrackedTypes;
+	// Per NinjaLive: where it tracks (its interaction volume's bounds), the object types it selects there, and its tag.
+	struct FNinjaSelection
+	{
+		FBox Area = FBox(ForceInit);
+		TArray<ECollisionChannel> Types;
+		FName Tag;
+	};
+	TArray<FNinjaSelection> Selections;
 	int32 Ninjas = 0;
 	bool bAllRelative = true;
 	bool bAllDensityOff = true;
@@ -813,18 +820,31 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 		{
 			Tags.AddUnique(Tag);
 		}
-		// The object types it selects bodies by, besides its tag.
+		// Where it tracks, and the object types it selects bodies by there, besides its tag.
+		FNinjaSelection& Selection = Selections.AddDefaulted_GetRef();
+		Selection.Tag = Tag;
 		bool bFilterFound = false;
+		Selection.Types = ReadObjectTypeFilter(**It, Settings.ObjectTypeFilterProperty, bFilterFound);
 		TArray<FString> TypeNames;
-		for (const ECollisionChannel Type : ReadObjectTypeFilter(**It, Settings.ObjectTypeFilterProperty, bFilterFound))
+		for (const ECollisionChannel Type : Selection.Types)
 		{
-			TrackedTypes.AddUnique(Type);
 			TypeNames.Add(ObjectTypeName(Type));
+		}
+		for (const UActorComponent* Component : It->GetComponents())
+		{
+			const UPrimitiveComponent* Volume = IsLiveComponent(Component) && Component->GetFName() == Settings.InteractionVolumeComponent ? Cast<UPrimitiveComponent>(Component) : nullptr;
+			if (Volume)
+			{
+				Selection.Area = Volume->Bounds.GetBox();
+				break;
+			}
 		}
 		const FString Types = !bFilterFound ? FString::Printf(TEXT("no '%s' setting"), *Settings.ObjectTypeFilterProperty.ToString())
 			: (TypeNames.IsEmpty() ? FString(TEXT("none")) : FString::Join(TypeNames, TEXT(", ")));
-		Report += FString::Printf(TEXT("%s: tracking tag %s; object types %s; paints tracked %s (%s), %s (%s)\n"), *It->GetName(), Tag.IsNone() ? TEXT("none (object types only)") : *Tag.ToString(),
-			*Types, bRelative ? TEXT("velocity relative to the water") : TEXT("world velocity"), *How, bDensityOff ? TEXT("no density") : TEXT("density too"), *DensityHow);
+		const FString Area = Selection.Area.IsValid ? FString::Printf(TEXT("%.0f x %.0f m"), Selection.Area.GetSize().X / 100.0, Selection.Area.GetSize().Y / 100.0)
+			: FString::Printf(TEXT("none (no '%s' component, so it selects nothing)"), *Settings.InteractionVolumeComponent.ToString());
+		Report += FString::Printf(TEXT("%s: tracking tag %s; object types %s; area %s; paints tracked %s (%s), %s (%s)\n"), *It->GetName(), Tag.IsNone() ? TEXT("none (object types only)") : *Tag.ToString(),
+			*Types, *Area, bRelative ? TEXT("velocity relative to the water") : TEXT("world velocity"), *How, bDensityOff ? TEXT("no density") : TEXT("density too"), *DensityHow);
 	}
 	const int32 Mode = FluidNinjaBuoyancyCVars::Tracking;
 	const bool bSafe = Ninjas > 0 && bAllRelative && bAllDensityOff;
@@ -869,10 +889,24 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 			continue;
 		}
 		const bool bWants = Component->Interaction != EFluidNinjaBuoyancyInteraction::Wakes;
-		// A NinjaLive selects the body by its object type, or by the tag the hand-over adds; one that selects it neither way doesn't track it.
+		// A NinjaLive tracks the body only where its interaction volume overlaps it, and only if it selects it there: by object type, or
+		// by the tag the hand-over adds. (Bounds are compared as axis-aligned boxes.)
 		const ECollisionChannel ObjectType = Primitive->GetCollisionObjectType();
-		const bool bByType = TrackedTypes.Contains(ObjectType);
-		const bool bSelectable = bByType || !Tags.IsEmpty();
+		const FBox Body = Primitive->Bounds.GetBox();
+		bool bInArea = false;
+		bool bSelectable = false;
+		bool bTracked = false;
+		for (const FNinjaSelection& Selection : Selections)
+		{
+			if (!Selection.Area.IsValid || !Selection.Area.Intersect(Body))
+			{
+				continue;
+			}
+			bInArea = true;
+			const bool bByType = Selection.Types.Contains(ObjectType);
+			bSelectable |= bByType || !Selection.Tag.IsNone();
+			bTracked |= bByType || (!Selection.Tag.IsNone() && Primitive->ComponentHasTag(Selection.Tag));
+		}
 		const bool bGo = bHandOver && bSelectable;
 		if (bWants && bGo && !Slot.bHandedOver)
 		{
@@ -907,9 +941,16 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 			Slot.bHandedOver = false;
 			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: taken back from FluidNinja's tracking."), *GetNameSafe(Component->GetOwner()));
 		}
-		// FluidNinja's tracking needs overlap events, and a NinjaLive selecting the body by object type or by tag.
-		Slot.bNinjaTracked = Primitive->GetGenerateOverlapEvents() && (bByType || Tags.ContainsByPredicate([Primitive](const FName& Tag) { return Primitive->ComponentHasTag(Tag); }));
-		const FString Note = !Reason.IsEmpty() ? Reason : (!bSelectable ? FString::Printf(TEXT("unselected %s"), *ObjectTypeName(ObjectType)) : FString());
+		// FluidNinja's tracking needs overlap events, and a NinjaLive whose area holds the body selecting it by object type or by tag.
+		Slot.bNinjaTracked = Primitive->GetGenerateOverlapEvents() && bTracked;
+		const FString Note = !Reason.IsEmpty() ? Reason : (bSelectable ? FString() : (bInArea ? FString::Printf(TEXT("unselected %s"), *ObjectTypeName(ObjectType)) : FString(TEXT("outside"))));
+		if (Reason.IsEmpty() && bWants && !bInArea && Slot.TrackingNote != Note)
+		{
+			// Not an error: outside every NinjaLive's area there is no simulation to stir. It is handed over once it enters one.
+			Slot.TrackingNote = Note;
+			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy on %s: not handed to FluidNinja's tracking: it is outside every NinjaLive's '%s'."),
+				*GetNameSafe(Component->GetOwner()), *Settings.InteractionVolumeComponent.ToString());
+		}
 		if (bWants && !Slot.bHandedOver && (!Slot.bNinjaTracked || Ninjas == 0) && !Note.IsEmpty() && Slot.TrackingNote != Note)
 		{
 			// No fallback: this build needs the modified FluidNinja. (A body with overlap events of its own, in a level with a NinjaLive,
@@ -925,10 +966,10 @@ void UFluidNinjaBuoyancySubsystem::RefreshTracking()
 			}
 			else
 			{
-				UE_LOG(LogFluidNinjaBuoyancy, Error, TEXT("FluidNinja Buoyancy on %s: not tracked by FluidNinja, so %s. No NinjaLive selects it: its object type %s is in no NinjaLive's '%s', ")
-					TEXT("and no NinjaLive tracks by tag ('%s'). Add %s to a NinjaLive's Overlap Filter Inclusive Obj Type, or give it a tracking tag (the plugin adds it to the body)."),
+				UE_LOG(LogFluidNinjaBuoyancy, Error, TEXT("FluidNinja Buoyancy on %s: not tracked by FluidNinja, so %s. No NinjaLive selects it where it is: its object type %s is not in the '%s' of the NinjaLives ")
+					TEXT("whose '%s' it is in, and none of them tracks by tag ('%s'). Add %s to that NinjaLive's Overlap Filter Inclusive Obj Type, or give it a tracking tag (the plugin adds it to the body)."),
 					*GetNameSafe(Component->GetOwner()), bWakesToo ? TEXT("it stirs the water only with its wakes") : TEXT("it does not stir the water"),
-					*ObjectTypeName(ObjectType), *Settings.ObjectTypeFilterProperty.ToString(), *Settings.TrackingTagProperty.ToString(), *ObjectTypeName(ObjectType));
+					*ObjectTypeName(ObjectType), *Settings.ObjectTypeFilterProperty.ToString(), *Settings.InteractionVolumeComponent.ToString(), *Settings.TrackingTagProperty.ToString(), *ObjectTypeName(ObjectType));
 			}
 		}
 		if (Slot.bNinjaTracked && !Slot.bHandedOver && Ninjas > 0 && !bSafe && !Slot.bTrackingWarned)

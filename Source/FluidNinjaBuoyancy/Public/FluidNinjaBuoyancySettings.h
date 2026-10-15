@@ -128,10 +128,16 @@ public:
 	FName TrackingTagProperty = TEXT("TrackActorPrimitiveComponentsWithTag");
 
 	/** The NinjaLive property (on the actor, or failing that its NinjaLive component) listing the object types it tracks, FluidNinja's
-	 * Overlap Filter Inclusive Obj Type. A body is handed to the tracking only if some NinjaLive will select it: its object type is in
-	 * one of these lists, or a NinjaLive tracks by tag (the plugin adds that tag). Otherwise the log says why it is not tracked. */
+	 * Overlap Filter Inclusive Obj Type. A body is handed to the tracking only if a NinjaLive whose interaction volume overlaps it will
+	 * select it: its object type is in that NinjaLive's list, or that NinjaLive tracks by tag (the plugin adds the tag). Otherwise the
+	 * log says why it is not tracked. */
 	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
 	FName ObjectTypeFilterProperty = TEXT("OverlapFilterInclusiveObjType");
+
+	/** The NinjaLive component whose bounds are where it tracks (FluidNinja's InteractionVolume). A body outside every NinjaLive's
+	 * volume is not handed over until it enters one; a NinjaLive without this component selects nothing. */
+	UPROPERTY(config, EditAnywhere, Category = "FluidNinja Tracking")
+	FName InteractionVolumeComponent = TEXT("InteractionVolume");
 
 	/** How a NinjaLive says its tracking paints a body's velocity relative to the water under it (instead of its world velocity, which
 	 * makes a current speed itself up around floating bodies): a bool or number property of this name on the NinjaLive actor or one
