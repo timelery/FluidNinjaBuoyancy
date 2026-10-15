@@ -46,8 +46,8 @@ We switched parts of the brush off at runtime, in the same test (fixed 60 fps):
 ## The proposed change
 
 Two parts:
-1. **Density.** Set **Selectively Kill Brush Density Keep Velocity** to 1 on every NinjaLive that tracks floating bodies. This is an existing setting. Set it on the NinjaLive in the level: our runs set it before Play, and changing it during play was not tested.
-2. **Relative velocity.** A new user parameter turns it on: `TrackVelocityRelativeToWater` (float, default 0 = today's behaviour, on above 0.5). When it is on, `PainterSourceData`'s ArrayReader branch paints a tracked pivot's velocity relative to the water at the pivot. A body drifting with the current then paints no velocity of its own; a body moved through the water (shoved, dropped, rowed) paints its motion through it.
+1. **Density.** Set **Selectively Kill Brush Density Keep Velocity** to 1 on every NinjaLive that tracks floating bodies. This is an existing setting. Set it on the NinjaLive in the level, on its **NinjaLiveComponent** (**Live Input Points → Brush Killers**). Saved there, it reaches the simulation: NinjaLive passes it on as the user parameter `Painter.SelectivelyKillBrushDensityKeepVelocity`, and PainterAndSim gets `SelectivelyKillPointSourceDensity` 1 (checked in the demo level, see [How to test it](#how-to-test-it-with-this-branch)). Changing it during play was not tested.
+2. **Relative velocity.** A new user parameter turns it on: `TrackVelocityRelativeToWater` (float, default 0 = today's behaviour, on above 0.5). When it is on, `PainterSourceData`'s ArrayReader branch paints a tracked pivot's velocity relative to the water at the pivot. A body drifting with the current then paints no velocity of its own; a body moved through the water (shoved, dropped, rowed) paints its motion through it. Set it in the level too, under the NinjaLiveComponent's **User Parameters**: the saved value reaches the simulation (checked in the demo level).
 
 ### Where it is done
 
@@ -91,6 +91,7 @@ Notes:
   - The vertical velocity, which drives the brush's puncture (splashes).
   - Camera-facing and screen-position tracking, whose `UnitVelocity` has other units.
   - Bodies slower than 2 cm/s, faded in up to 10 cm/s. So a tracked thing that stands still (a water volume, a parked prop) paints no velocity of its own, rather than braking the current. With density off it still paints the brush's radial puncture push (see the cost of the density switch below).
+  - Nothing is per body. The switch is a setting of the NinjaLive, so it changes every point that NinjaLive tracks, characters and skeletal-mesh bones included, not only floating bodies. A character wading with the current then paints less velocity than today, and one wading against it more. We measured only floating bodies.
 - **Switch off** (`TrackVelocityRelativeToWater` 0, the default): the node returns `UnitVelocity` unchanged, so painting is as today.
 
 Three assets change: `Core/Functions/PainterSourceData`, `Core/Modules/Ninja_Painter` (the two inputs) and `NinjaLiveCore` (the user parameter and the two links).
@@ -120,7 +121,9 @@ Other checks:
 
 The branch (`fluidninja-relative-tracking`) is the version of FluidNinja Buoyancy for the modified FluidNinja. Its floating bodies stir the water through FluidNinja's own tracking, and `main` keeps the wakes for FluidNinja as it is today.
 - **The per-body setting.** **Interaction** defaults to FluidNinja Tracking on this branch. FluidNinja Tracking and Wakes, or Wakes alone, can still be chosen explicitly.
-- **What hand-over means.** A FluidNinja Tracking body gets Generate Overlap Events, plus the NinjaLive's tracking tag if it sets one, and it never writes wakes.
+- **What hand-over means.** A FluidNinja Tracking body gets Generate Overlap Events, plus the NinjaLive's tracking tag if it sets one, and it never writes wakes. Taken back, it loses the tag again and Generate Overlap Events returns to what it was.
+  - **The tag** goes on the body's primitive (its Component Tags). FluidNinja tracks the body by that alone; the actor's Tags aren't needed. We checked this in the demo river, with **Track Actor Primitive Components With Tag** set on the river's NinjaLive actor (**Live Interaction**) and PhysicsBody taken out of its **Overlap Filter Inclusive Obj Type**. The floaters went 13.7 m (1.9 m/s), as when that NinjaLive tracks them by object type. With the tag cleared they went 14.6 m (1.7 m/s), untracked. Judge this one by the distance: the water speed is about the same whether they are tracked or not.
+  - **Not checked by the plugin:** whether a NinjaLive selects the body, by object type or by tag. A body that no NinjaLive selects is not tracked, although the log says it was handed over.
 - **When it happens.** Only while every NinjaLive in the level does both:
   - turns on the switch named in **Project Settings → FluidNinja Buoyancy → FluidNinja Tracking → Relative Tracking Switch** (default `TrackVelocityRelativeToWater`: a bool or number property on the NinjaLive actor or a component, or a float user parameter; on above 0.5);
   - sets the setting named in **Tracked Density Switch** (default `SelectivelyKillBrushDensityKeepVelocity`) to 1, 4 or 5.
@@ -130,8 +133,10 @@ The branch (`fluidninja-relative-tracking`) is the version of FluidNinja Buoyanc
 To test:
 1. Open the demo level (`FluidNinjaBuoyancy/Demo/Maps/FNB_DemoPool`).
 2. With Play stopped, on each NinjaLive actor, select its **NinjaLiveComponent**:
-   - set **Selectively Kill Brush Density Keep Velocity** to 1;
+   - set **Selectively Kill Brush Density Keep Velocity** to 1 (**Live Input Points → Brush Killers**). Leave the copy under **User Parameters → DEBUG ONLY** (`Painter.SelectivelyKillBrushDensityKeepVelocity`) as it is: NinjaLive sets it from this one at Play;
    - under **User Parameters**, set `TrackVelocityRelativeToWater` to 1.
+
+   Save the level. Saved this way, with nothing set at runtime, both reach the simulation: the river test (step 5, run in a standalone game at fixed 60 fps, twice) gave 13.7 m and 2.0 m/s, with every NinjaLive reported as relative with no density.
 3. Press Play and check `stat fps`: compare with the table's column nearest that frame rate. Below 30 fps (three or more simulation ticks a frame) the floaters go less far for about the same water speed (about 9 to 10 m at fixed 20 fps), so there compare step 5 with step 4's baseline from the same session. The first run after the core change may still be compiling shaders: run each test twice and use the second.
 4. Type `fnb.Demo.RiverTest wakes` in the console. After about 15 s the log lists each floater's route, the water under it and how far it went: the baseline.
 5. Type `fnb.Demo.RiverTest tracking`. The test's report should list each NinjaLive as painting tracked velocity relative to the water, with no density, and each floater's route as `FluidNinja tracking`. The numbers should land near no interaction (the tables above). The "handed to FluidNinja's own tracking (relative to the water, no density)" lines come earlier in the log: at Play start, and about a second after step 4's test ends.
