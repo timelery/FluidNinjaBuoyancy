@@ -1,0 +1,24 @@
+# Build output (UnrealBuildTool and the editor make these)
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Packaged releases: attach these to a GitHub Release instead of committing them
+Releases/
+
+# Python bytecode (a run or a syntax check of Tools/CorePatch writes it next to the script)
+__pycache__/
+
+# IDE and OS files
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+Thumbs.db
+.DS_Store

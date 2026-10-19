@@ -1,0 +1,1842 @@
+[
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PrimitiveName",
+    "type": "FName",
+    "default": "Constructor / empty",
+    "category": "Hull",
+    "units": "",
+    "comment": "The floating primitive; None uses the actor's root."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "HullModel",
+    "type": "EFluidNinjaHullModel",
+    "default": "EFluidNinjaHullModel::Triangles",
+    "category": "Hull",
+    "units": "",
+    "comment": "How the body meets the water: the hull surface (boats), voxels (logs, crates) or spheres (pontoons: balls, small props)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "HullResolutionCm",
+    "type": "float",
+    "default": "40.f",
+    "category": "Hull",
+    "units": "cm",
+    "comment": "The hull is rebuilt from the simple collision as an even shell of triangles about this size, so the water line is followed across big faces (coarser if Max Hull Triangles is reached)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MaxHullTriangles",
+    "type": "int32",
+    "default": "1000",
+    "category": "Hull",
+    "units": "",
+    "comment": "The most triangles the hull may have; past it the shell is made coarser than Hull Resolution. More follows the water line more closely and costs more every physics step. The farther levels of detail get a quarter and a sixteenth of it."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "LodDistancesCm",
+    "type": "FVector2D",
+    "default": "FVector2D(3000.0, 8000.0)",
+    "category": "Hull",
+    "units": "cm",
+    "comment": "Distances from the camera. Triangles model: beyond the first the hull is twice as coarse, beyond the second four times. Every model: beyond the first a slam throws only its main splash (no crown and no plunge splashes) and only while the frame's splash budget is less than half spent (fnb.Effects.SplashBudgetPerFrame); beyond the second, or when the body has not been drawn for a second, no splashes or spray at all."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "VoxelSizeCm",
+    "type": "float",
+    "default": "0.f",
+    "category": "Hull",
+    "units": "cm",
+    "comment": "Voxels model: cube size (0: about Voxel Count of them fill the hull)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "VoxelCount",
+    "type": "int32",
+    "default": "48",
+    "category": "Hull",
+    "units": "",
+    "comment": "Voxels model: about how many cubes fill the hull when Voxel Size is 0. More follows the shape more closely and costs more."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "Pontoons",
+    "type": "TArray<FFluidNinjaPontoon>",
+    "default": "Constructor / empty",
+    "category": "Hull",
+    "units": "",
+    "comment": "Spheres model: the pontoons (body frame). Empty: two rows along the hull's bottom, lifting what the whole hull would."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bSleepWhenSettled",
+    "type": "bool",
+    "default": "true",
+    "category": "Hull",
+    "units": "",
+    "comment": "Once settled (barely moving for two seconds), out of sight and farther than Sleep Distance from the camera, the body sleeps and the water leaves it alone until it is seen, comes near, or something hits it."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SleepDistanceCm",
+    "type": "float",
+    "default": "6000.f",
+    "category": "Hull",
+    "units": "cm",
+    "comment": "A settled body sleeps only when at least this far from the camera (and out of sight); it wakes when it comes nearer."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MassMode",
+    "type": "EFluidNinjaBuoyancyMass",
+    "default": "EFluidNinjaBuoyancyMass::RestDraft",
+    "category": "Floating",
+    "units": "",
+    "comment": "Where the body's mass comes from: Rest Draft sets it at Begin Play to what the hull displaces at Rest Draft; Body Mass keeps its own (Physics → Mass), and it floats wherever that puts it, or sinks."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "RestDraftCm",
+    "type": "float",
+    "default": "15.f",
+    "category": "Floating",
+    "units": "cm",
+    "comment": "How deep the hull's lowest point sits in calm water, at rest."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bSettleOnStart",
+    "type": "bool",
+    "default": "true",
+    "category": "Floating",
+    "units": "",
+    "comment": "Held still at Begin Play until its water has been read, then set level at its rest draft on that water and released: no drop or slam at the start."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "RestAttitude",
+    "type": "FRotator",
+    "default": "FRotator::ZeroRotator",
+    "category": "Floating",
+    "units": "",
+    "comment": "How the body floats relative to its own frame: zero for a mesh modelled the way up it floats (a boat); a log or barrel modelled standing up floats lying down with Pitch 90. Rest Draft, the stability check and Settle On Start use it."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MaxDepenetrationSpeed",
+    "type": "float",
+    "default": "100.f",
+    "category": "Floating",
+    "units": "cm/s",
+    "comment": "How fast physics may push the body out of something it starts in or is pressed into (rocks under the water): low, so a bad placement eases out instead of launching it. 0 leaves the project setting."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "CenterOfMassOffset",
+    "type": "FVector",
+    "default": "FVector::ZeroVector",
+    "category": "Floating",
+    "units": "cm",
+    "comment": "Moves the centre of mass (body frame): lower is more stable. The hull analysis reports the metacentric height."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "InertiaScale",
+    "type": "FVector",
+    "default": "FVector::OneVector",
+    "category": "Floating",
+    "units": "",
+    "comment": "Scales the body's inertia (a hollow hull turns more slowly than a solid one of the same shape)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "BuoyancyMultiplier",
+    "type": "float",
+    "default": "1.f",
+    "category": "Floating",
+    "units": "",
+    "comment": "Art control on the lift. 1 is Archimedes."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PressureDragLinear",
+    "type": "float",
+    "default": "0.3f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Pressure drag where a face pushes into the water: the part that grows with its speed through the water (speed / 1 m/s; Kerner's Cpd1)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PressureDragQuadratic",
+    "type": "float",
+    "default": "1.f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Pressure drag where a face pushes into the water: the part that grows with the square of its speed through the water ((speed / 1 m/s)²; Kerner's Cpd2)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PressureFalloff",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "How the pressure drag falls off as a face turns from meeting the flow head-on: it is scaled by cos^Falloff of the angle between the face's normal and the flow (Kerner's fp). Lower keeps more drag on slanted faces."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SuctionDragLinear",
+    "type": "float",
+    "default": "0.3f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Suction where a face pulls away from the water (behind the hull): the part that grows with its speed through the water (speed / 1 m/s; Kerner's Csd1)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SuctionDragQuadratic",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Suction where a face pulls away from the water: the part that grows with the square of its speed through the water ((speed / 1 m/s)²; Kerner's Csd2)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SuctionFalloff",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "How the suction falls off as a face turns from facing straight away from the flow: it is scaled by cos^Falloff of that angle (Kerner's fs). Lower keeps more suction on slanted faces."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "ViscousMultiplier",
+    "type": "float",
+    "default": "1.f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Skin friction (ITTC 1957 line)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SlamMultiplier",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Slamming when faces drive into the water (bow slap, landing from a drop)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "FlowCoupling",
+    "type": "float",
+    "default": "1.f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "How much the current carries the body (0 ignores it, 1 is physical)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "AirDragCoefficient",
+    "type": "float",
+    "default": "0.8f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Drag on the dry part from the air and the wind."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "AngularDamping",
+    "type": "FVector",
+    "default": "FVector::ZeroVector",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": "Extra damping about the body's roll, pitch and yaw axes while wet (1/s). Zero leaves it to the water."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bPropulsion",
+    "type": "bool",
+    "default": "false",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "A propeller and rudder (body frame). Throttle and Rudder are set from Blueprint, or the console for testing (fnb.Boat.Throttle, fnb.Boat.Rudder) when Console Control is on."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bConsoleControl",
+    "type": "bool",
+    "default": "true",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "For testing: a change of fnb.Boat.Throttle or fnb.Boat.Rudder sets this body's Throttle and Rudder. Off: only Blueprint sets them."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "ThrustLocation",
+    "type": "FVector",
+    "default": "FVector::ZeroVector",
+    "category": "Propulsion",
+    "units": "cm",
+    "comment": "Where the propeller pushes, in the body's frame. It pushes only while it is under the water."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "ThrustDirection",
+    "type": "FVector",
+    "default": "FVector::ForwardVector",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "Which way the propeller pushes at full ahead, in the body's frame (zero: forward, +X); astern pushes the other way."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MaxThrustNewtons",
+    "type": "float",
+    "default": "1500.f",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "The propeller's push at full throttle, newtons."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PropWashSpeed",
+    "type": "float",
+    "default": "300.f",
+    "category": "Propulsion",
+    "units": "cm/s",
+    "comment": "The propeller's wash over the rudder at full throttle, so the boat steers when slow."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "RudderLocation",
+    "type": "FVector",
+    "default": "FVector::ZeroVector",
+    "category": "Propulsion",
+    "units": "cm",
+    "comment": "Where the rudder sits, in the body's frame. It steers only while it is under the water."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "RudderAreaCm2",
+    "type": "float",
+    "default": "900.f",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "The rudder blade's area, cm²: its side force grows with it and with the square of the water's speed past the rudder (the boat's speed through the water plus the propeller's wash). 0: no rudder."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MaxRudderAngle",
+    "type": "float",
+    "default": "35.f",
+    "category": "Propulsion",
+    "units": "deg",
+    "comment": "The rudder's angle at Rudder -1 or 1."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "Throttle",
+    "type": "float",
+    "default": "0.f",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "-1 (full astern) to 1 (full ahead)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "Rudder",
+    "type": "float",
+    "default": "0.f",
+    "category": "Propulsion",
+    "units": "",
+    "comment": "-1 (hard left) to 1 (hard right)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bWake",
+    "type": "bool",
+    "default": "true",
+    "category": "Wake",
+    "units": "",
+    "comment": "Pushes the water: the pieces of water line driving into it (sideways, or outward as the hull sinks in: a drop makes a ring) are written into FluidNinja's data channel as moving brush points, so the simulation makes the bow wave, the wake and foam (Project Settings → FluidNinja Buoyancy → Wake; console fnb.Buoyancy.Wake). This works without tags or overlap events. It is separate from FluidNinja's own tracking (Generate Overlap Events on the floating primitive), which paints the body's pivot point; the two can run together."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "Interaction",
+    "type": "EFluidNinjaBuoyancyInteraction",
+    "default": "EFluidNinjaBuoyancyInteraction::FluidNinjaTracking",
+    "category": "Wake",
+    "units": "",
+    "comment": "How the body stirs the simulation: FluidNinja's own tracking relative to the water (the default, which needs the modified FluidNinja: Project Settings → FluidNinja Buoyancy → FluidNinja Tracking; console fnb.Buoyancy.Tracking), or the plugin's wakes. FluidNinja's tracking as it is today paints a body's world velocity, and a floater carried by a current then speeds that current up, so a body is handed to it only when every NinjaLive says it tracks relative to the water and paints no density for tracked bodies (Tracked Density Switch 1, 4 or 5)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WakeBrushSizeCm",
+    "type": "float",
+    "default": "60.f",
+    "category": "Wake",
+    "units": "cm",
+    "comment": "Brush size of each wake point at a push of 2 m/s (scaled 0.4–2x with the push)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WakeMinPushCmS",
+    "type": "float",
+    "default": "20.f",
+    "category": "Wake",
+    "units": "cm/s",
+    "comment": "Pieces of water line pushing into the water slower than this leave no wake."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WakeGain",
+    "type": "float",
+    "default": "0.15f",
+    "category": "Wake",
+    "units": "",
+    "comment": "Each frame a wake point gives the water this share of what it lacks: the hull's outward speed there minus the water's own. FluidNinja adds brush velocity every frame, so the water near the hull approaches the hull's speed and never overshoots it. A body that makes wakes, or that FluidNinja tracks itself (Generate Overlap Events on), takes its current from the water around it, not from the water it has just pushed."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WakeStrength",
+    "type": "float",
+    "default": "0.35f",
+    "category": "Wake",
+    "units": "",
+    "comment": "How much of the hull's speed through the water (relative to the current around it) the water at the hull takes on. A hull stirs only the water near the surface, not the whole depth FluidNinja's flat simulation stands for: 1 would make it a wall through the water (the current then races round it), 0 leaves the water alone. A body drifting with the current makes none."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PlungeGain",
+    "type": "float",
+    "default": "1.f",
+    "category": "Wake",
+    "units": "",
+    "comment": "The impact burst: where the hull sinks into the water (a drop, a dunk, a flat bottom slapping down), the water it displaces runs outward across the water line at about the sinking speed. This scales that outward speed: 1 is physical, 0 leaves only the side wake. A radial burst carries no net momentum, so it cannot build a current."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "PlungeResponse",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Wake",
+    "units": "",
+    "comment": "Each frame a burst point gives the water this share of what it lacks of the burst's outward speed (as Wake Gain does for the side wake): higher makes the ring start faster and harder."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bWaves",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "The body takes part in FluidNinja Waves (Project Settings → FluidNinja Buoyancy → Waves): its static head (how deep its hull sits below the wave-free surface) and the impulse of the slam and drag that stop it make real water waves in FluidNinja's simulation, which spread, bounce off banks and rock other floaters; and it feels the others' waves (its own taken out, its own waves' drag put back as radiation damping). Off: it floats on FluidNinja's own surface and leaves the waves alone."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WaveFeelScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Scales how much of the waves this body feels (κ, with Project Settings → FluidNinja Buoyancy → Waves → Wave Feel Scale): 1 is physical, 0 floats it on FluidNinja's own surface while it still makes waves."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "bWetLine",
+    "type": "bool",
+    "default": "true",
+    "category": "Wet Line",
+    "units": "",
+    "comment": "Darkens and glosses the hull below the water line and where it was wet a moment ago, drying at Drying Speed. The hull's materials read it as Custom Primitive Data (Wet Line Data Index … +3: the water line plane in the mesh's local space, and how far above it the hull is still wet). Add the material function MF_FNB_HullWetness to the hull's material to show it."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "DryingSpeedCmS",
+    "type": "float",
+    "default": "1.5f",
+    "category": "Wet Line",
+    "units": "cm/s",
+    "comment": "How fast the wet band above the water line dries, from the top down (and the whole hull once it is out of the water)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WetLineDataIndex",
+    "type": "int32",
+    "default": "0",
+    "category": "Wet Line",
+    "units": "",
+    "comment": "The first of the four Custom Primitive Data slots the wet line writes on the floating primitive (this index … +3); move it when the hull's materials use those slots for something else."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SplashSystem",
+    "type": "TSoftObjectPtr<UNiagaraSystem>",
+    "default": "Constructor / empty",
+    "category": "Spray",
+    "units": "",
+    "comment": "Spray where the hull slams into the water and at the bow when it drives hard into it. None: the project default (FluidNinja Buoyancy → Effects)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SplashMinWatts",
+    "type": "float",
+    "default": "300.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "Slams at least this strong (watts) throw a splash where they hit (the noise floor: a bobbing body's small slams make none). Its size is on the project's splash scale (FluidNinja Buoyancy → Effects → Splash Reference Watts), the same for every body. The body's entry (going in after being clear of the water) does not use this floor: it splashes whenever its own entry power makes a splash of at least 0.2 on that scale. 0: no slam splashes (entries and bow spray still run)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "MaxSplashStrength",
+    "type": "float",
+    "default": "12.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "The largest a splash from this body gets: its size is the cube root of the slam's (or entry's, or bow spray's) power over Splash Reference Watts (eight times the power, twice the splash), up to this many times the splash system's own size (before Splash Scale) and never past the project's Splash Strength Ceiling. Splashes under 0.2 are not drawn. Up to three more splashes go where the water line plunges in hardest, smaller by how much slower it plunges there."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "BowSprayMinPushCmS",
+    "type": "float",
+    "default": "150.f",
+    "category": "Spray",
+    "units": "cm/s",
+    "comment": "When nothing slams, spray is thrown where the water line drives into the water at least this fast (the bow), on the project's splash scale: the power of the water that piece of water line drives in (its area × the cube of its speed), so twice the speed is twice the spray. 0: no bow spray."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SplashScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "Scales the size of every splash and spray from this body."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SplashInterval",
+    "type": "float",
+    "default": "0.12f",
+    "category": "Spray",
+    "units": "s",
+    "comment": "The least time between two slam splashes from this body, and between two bow sprays. A slam does not wait for the bow spray's interval (it cuts in), and a slam that could not splash yet keeps its hardest value for a quarter of a second, so one-frame slams on a spraying bow are not lost."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SlapSound",
+    "type": "TSoftObjectPtr<USoundBase>",
+    "default": "Constructor / empty",
+    "category": "Sound",
+    "units": "",
+    "comment": "A one-shot played where the hull slams into the water (Slap Min Watts), louder the harder the slam. Float inputs a MetaSound can read are set on it: \"Pitch Shift\" (semitones), \"Impact\" (the slam on the project's splash scale, Splash Reference Watts), \"Speed\" (the water running past the water line, cm/s), \"Length\" (the water line, cm) and \"Mass\" (the body, kg). None: the project default (Project Settings → FluidNinja Buoyancy → Effects; no sounds ship with the plugin)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WashSound",
+    "type": "TSoftObjectPtr<USoundBase>",
+    "default": "Constructor / empty",
+    "category": "Sound",
+    "units": "",
+    "comment": "A loop played while the hull is in the water: the water running along the hull, louder and higher the faster it runs past the water line (Wash Full Speed) and the longer the water line; quiet lapping at rest. Its \"Pitch Shift\" input (semitones) follows the speed; \"Impact\", \"Speed\", \"Length\" and \"Mass\" are kept up to date on it as on the slap. None: the project default (Project Settings → FluidNinja Buoyancy → Effects; no sounds ship with the plugin)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "CreakSound",
+    "type": "TSoftObjectPtr<USoundBase>",
+    "default": "Constructor / empty",
+    "category": "Sound",
+    "units": "",
+    "comment": "A one-shot played when the hull is thrown about (Creak Min Angular Acceleration) or slams four times Slap Min Watts; \"Pitch Shift\" (semitones), \"Impact\", \"Speed\", \"Length\" and \"Mass\" are set on it as on the slap. None: the project default (Project Settings → FluidNinja Buoyancy → Effects; no sounds ship with the plugin)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "DripSound",
+    "type": "TSoftObjectPtr<USoundBase>",
+    "default": "Constructor / empty",
+    "category": "Sound",
+    "units": "",
+    "comment": "A one-shot played once when the hull leaves the water entirely: water dripping off it. Its float input \"Impact\" is set to how high the hull is wet above its last water line (cm), so a MetaSound can drip longer from a hull that went in deeper. None: no drip (there is no project default)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "Attenuation",
+    "type": "TSoftObjectPtr<USoundAttenuation>",
+    "default": "Constructor / empty",
+    "category": "Sound",
+    "units": "",
+    "comment": "How the hull's sounds fade with distance. None: the project default (Project Settings → FluidNinja Buoyancy → Effects)."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SoundVolume",
+    "type": "float",
+    "default": "1.f",
+    "category": "Sound",
+    "units": "",
+    "comment": "Scales the volume of all of this body's hull sounds."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SlapMinWatts",
+    "type": "float",
+    "default": "150.f",
+    "category": "Sound",
+    "units": "",
+    "comment": "Slams at least this strong (watts) play a slap; four times this also creaks. 0: no slaps, and no creaks from slams."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "WashFullSpeedCmS",
+    "type": "float",
+    "default": "250.f",
+    "category": "Sound",
+    "units": "cm/s",
+    "comment": "The wash is at full volume when the water runs past the water line this fast."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "CreakMinAngularAcceleration",
+    "type": "float",
+    "default": "2.f",
+    "category": "Sound",
+    "units": "",
+    "comment": "Creaks when the hull's spin changes faster than this (rad/s²), or on a hard slam."
+  },
+  {
+    "owner": "Body component",
+    "source": "S1",
+    "name": "SlamEventWatts",
+    "type": "float",
+    "default": "200.f",
+    "category": "Events",
+    "units": "",
+    "comment": "Slams weaker than this (watts) raise no event."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bEnabled",
+    "type": "bool",
+    "default": "true",
+    "category": "Water",
+    "units": "",
+    "comment": "Floating bodies feel the water. Console: fnb.Buoyancy -1 this setting (the default), 0 off, 1 on, 2 on with the debug view."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SurfaceTags",
+    "type": "TArray<FName>",
+    "default": "Constructor / empty",
+    "category": "Water",
+    "units": "",
+    "comment": "Actors carrying one of these tags draw the water surface: FluidNinja's river spline pieces (SplineSource), its sea surfaces (SeaSurface), and any surface you tag FluidNinjaBuoyancySurface (a pool plane, a Niagara water sheet). The height capture shows only their surface primitives, leaving out a waterfall's face (steeper than 45 degrees)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "NinjaParameterCollection",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Water",
+    "units": "",
+    "comment": "FluidNinja's material parameter collection: where a simulation that follows the player is (TraceMeshPos, TraceMeshSize in metres). Simulations that set those parameters on their surface material instead are found from the material."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "VelocityBufferParameter",
+    "type": "FName",
+    "default": "TEXT(\"VelocityDensityBuffer\")",
+    "category": "Water",
+    "units": "",
+    "comment": "The surface material's texture parameter holding the simulation's velocity (RG) and density (B)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "CaptureWidthCm",
+    "type": "float",
+    "default": "8000.f",
+    "category": "Surface Mirror",
+    "units": "cm",
+    "comment": "Width of the square the drawn water is captured over, centred on the simulation that follows the player, else on the first floating body (FluidNinja's river template: 80 m)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "CaptureResolution",
+    "type": "int32",
+    "default": "1024",
+    "category": "Surface Mirror",
+    "units": "",
+    "comment": "Texels across the capture (1024 over 80 m: 7.8 cm)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "NearPlaneAboveBodiesCm",
+    "type": "float",
+    "default": "200.f",
+    "category": "Surface Mirror",
+    "units": "cm",
+    "comment": "The capture looks down from this far above the highest floating body (or the water under it): water higher up, such as a river passing over a pool, is above its near plane and left out."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FootprintMarginCm",
+    "type": "float",
+    "default": "100.f",
+    "category": "Surface Mirror",
+    "units": "cm",
+    "comment": "The water read back around each body: its bounds plus this, plus how far it moves in FootprintLeadSeconds."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FootprintLeadSeconds",
+    "type": "float",
+    "default": "0.15f",
+    "category": "Surface Mirror",
+    "units": "s",
+    "comment": ""
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bGPUGather",
+    "type": "bool",
+    "default": "true",
+    "category": "Surface Mirror",
+    "units": "",
+    "comment": "Many bodies: one compute pass resamples every body's water (height and current) onto its own grid and one readback brings it all back, instead of two copies and two readbacks per body. Console: fnb.Buoyancy.Gather -1 this setting (the default), 0 the per-body copies, 1 the gather (A/B)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxGatherGrid",
+    "type": "int32",
+    "default": "128",
+    "category": "Surface Mirror",
+    "units": "",
+    "comment": "A body's grid points are one capture texel apart, two beyond its first hull level-of-detail distance and four beyond the second; at most this many across (a larger body is sampled more coarsely)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxGatherBodies",
+    "type": "int32",
+    "default": "256",
+    "category": "Surface Mirror",
+    "units": "",
+    "comment": "Bodies gathered in one frame at most; with more, they take turns."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxExtrapolationSeconds",
+    "type": "float",
+    "default": "0.08f",
+    "category": "Surface Mirror",
+    "units": "s",
+    "comment": "The read-back water is a few frames old: its heights are carried forward by their rate of change for at most this long."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FlowScaleMultiplier",
+    "type": "float",
+    "default": "1.f",
+    "category": "Flow",
+    "units": "",
+    "comment": "The current (cm/s) is the velocity buffer × SimSpeed × cell size × simulation steps per second × this. The steps per second are the fixed tick of FluidNinja's NinjaLiveCore system (1/60 s: 60 steps a second at any frame rate); a NinjaLiveCore without a fixed tick steps at FluidNinja's SamplingFPS, at most the frame rate."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxFlowSpeedCmS",
+    "type": "float",
+    "default": "600.f",
+    "category": "Flow",
+    "units": "cm/s",
+    "comment": "Currents faster than this are clamped (the buffer is clamped at FluidNinja's VelocityClamp)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaterDensity",
+    "type": "float",
+    "default": "1000.f",
+    "category": "Physics",
+    "units": "",
+    "comment": "Water density (kg/m³)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "AirDensity",
+    "type": "float",
+    "default": "1.2f",
+    "category": "Physics",
+    "units": "",
+    "comment": "Air density (kg/m³) for the dry part of a hull."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bStableSteps",
+    "type": "bool",
+    "default": "true",
+    "category": "Physics",
+    "units": "",
+    "comment": "Keeps light bodies (balls, small props) stable whatever the physics step: the part of the water's spring (lift) and drag that a step is too long for is applied implicitly, as if the step had been cut finer. Bodies the step resolves well are untouched, so it works with the engine's default physics (one step a frame, any frame rate), substepping or async physics. Console: fnb.Buoyancy.Implicit -1 this setting (the default), 0 plain explicit forces, 1 stable steps (A/B)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "Wind",
+    "type": "FVector",
+    "default": "FVector::ZeroVector",
+    "category": "Wind",
+    "units": "",
+    "comment": "The wind on the dry part of hulls (cm/s, world)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWakes",
+    "type": "bool",
+    "default": "true",
+    "category": "Wake",
+    "units": "",
+    "comment": "Bodies push the water: each frame, the pieces of water line driving into it are written to FluidNinja's point input (its global Niagara Data Channel: Position, PositionPrevious, VelocityAndSize), so the simulation makes their bow waves, wakes and foam, which rock everything else. The FluidNinja simulation must read that channel (its DataChannelPointReaderEnabled on). The project default: each body's Wake switch can turn its own off, and its Interaction chooses wakes, FluidNinja's tracking or both. Console: fnb.Buoyancy.Wake -1 this setting (the default), 0 no wakes at all (the swimmers' too), 1 on (A/B)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WakeDataChannel",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Wake",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxWakePoints",
+    "type": "int32",
+    "default": "256",
+    "category": "Wake",
+    "units": "",
+    "comment": "At most this many wake points a frame for all bodies (FluidNinja reads up to its DataChannelThroughput, 4000)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "TrackingTagProperty",
+    "type": "FName",
+    "default": "TEXT(\"TrackActorPrimitiveComponentsWithTag\")",
+    "category": "FluidNinja Tracking",
+    "units": "",
+    "comment": "FluidNinja's own tracking, for bodies whose Interaction asks for it: the NinjaLive property (on the actor or its NinjaLive component) holding the component tag it tracks, FluidNinja's Track Actor Primitive Components With Tag. A body handed to the tracking gets that tag, besides Generate Overlap Events, which FluidNinja's tracking needs either way."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "ObjectTypeFilterProperty",
+    "type": "FName",
+    "default": "TEXT(\"OverlapFilterInclusiveObjType\")",
+    "category": "FluidNinja Tracking",
+    "units": "",
+    "comment": "The NinjaLive property (on the actor, or failing that its NinjaLive component) listing the object types it tracks, FluidNinja's Overlap Filter Inclusive Obj Type. A body is handed to the tracking only if a NinjaLive whose interaction volume overlaps it will select it: its object type is in that NinjaLive's list, or that NinjaLive tracks by tag (the plugin adds the tag). Otherwise the log says why it is not tracked."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "InteractionVolumeComponent",
+    "type": "FName",
+    "default": "TEXT(\"InteractionVolume\")",
+    "category": "FluidNinja Tracking",
+    "units": "",
+    "comment": "The NinjaLive component whose bounds are where it tracks (FluidNinja's InteractionVolume). A body outside every NinjaLive's volume is not handed over until it enters one; a NinjaLive without this component selects nothing."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "RelativeTrackingSwitch",
+    "type": "FName",
+    "default": "TEXT(\"TrackVelocityRelativeToWater\")",
+    "category": "FluidNinja Tracking",
+    "units": "",
+    "comment": "How a NinjaLive says its tracking paints a body's velocity relative to the water under it (instead of its world velocity, which makes a current speed itself up around floating bodies): a bool or number property of this name on the NinjaLive actor or one of its components, or a float user parameter of its simulation; on above 0.5. FluidNinja does not have this yet; the name is the proposal (see the user guide, \"FluidNinja's own tracking\"). Bodies are handed to the tracking only while every NinjaLive in the level says so, and also paints no density for them (Tracked Density Switch). Console: fnb.Buoyancy.Tracking."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "TrackedDensitySwitch",
+    "type": "FName",
+    "default": "TEXT(\"SelectivelyKillBrushDensityKeepVelocity\")",
+    "category": "FluidNinja Tracking",
+    "units": "",
+    "comment": "How a NinjaLive says tracked bodies paint velocity but no density: FluidNinja's Selectively Kill Brush Density Keep Velocity, a number property of this name on the NinjaLive actor or one of its components, or an int user parameter of its simulation (User.Painter.<name> or User.<name>). 1 (ARRAY: primitives and bones), 4 (ARRAY and CHAOS) and 5 (ALL) count; 5 also takes the density out of this plugin's wakes, which are data-channel points. FluidNinja weights each tick's push of its river driver and brushes by the local density, so a tracked floater that paints density makes the current push harder along its path, even when its velocity is taken relative to the water. Set it on the NinjaLive in the level; changing it during play was not tested."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SplashSystem",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Effects",
+    "units": "",
+    "comment": "Defaults for bodies that set none of their own. The spray is spawned where a hull slams into the water or drives hard into it, scaled by how hard; any Niagara system works."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SplashReferenceWatts",
+    "type": "float",
+    "default": "70.f",
+    "category": "Effects",
+    "units": "",
+    "comment": "Splashes on one scale for every floating body and swimmer: a slam of this power (watts) makes a splash of strength 1 (the splash system at its own size), and the strength grows with the cube root of the power (eight times the power, twice the splash), so splash sizes compare across bodies, heights and stations. Each body's Splash Min Watts is its noise floor and its Splash Scale an art multiplier on top. At 70 W a 238 kg boat dropped 3 m (5.8 kW) throws a splash of 4.4, and a 175 kg crate dropped 3 m (35 kW) throws 8."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SplashStrengthCeiling",
+    "type": "float",
+    "default": "12.f",
+    "category": "Effects",
+    "units": "",
+    "comment": "The largest splash strength on the project's scale (a body's Max Splash Strength may cap its own lower)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SlapSound",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Effects",
+    "units": "",
+    "comment": "Hull sounds (none ship with the plugin; see the user guide, \"Hull sounds\"). Slap: a one-shot when a hull slams into the water. Wash: a looping sound of water running along the hull. Creak: a one-shot when the hull is thrown about. Their volume follows the water; a float input named \"Pitch Shift\" (semitones) is set on each, which MetaSounds can use."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WashSound",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Effects",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "CreakSound",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Effects",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "HullAttenuation",
+    "type": "FSoftObjectPath",
+    "default": "Constructor / empty",
+    "category": "Effects",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWaves",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "FluidNinja Waves: floating bodies and the swimmer make real water waves in FluidNinja's own simulation (the modified NinjaLiveCore runs a wave field beside its fluid, on its pressure buffer's cells): each body's static head (how deep its hull sits below the wave-free surface) and the impulses of the slam and drag that stop it, written each frame into a source texture per simulation (User.WaveSourceTexture). FluidNinja's surface draws the waves (MF_NinjaOutput_BaseFunction_SURFACE) and the other floaters feel them: each body feels the waves of everything but itself (B - B_self, its own field taken out by a self field that follows it, and put back as radiation damping). Needs the modified NinjaLiveCore (User.WaveSimEnabled): a stock one makes no waves, with an error."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveDepthCm",
+    "type": "float",
+    "default": "200.f",
+    "category": "Waves",
+    "units": "cm",
+    "comment": "The water's depth the waves run at where FluidNinja's height field is off (User.Wave.DepthCm); where it is on, the core takes water Z minus its bed. The waves slow and steepen in shallow water (ω² = (g·k + σ/ρ·k³)·tanh(k·d)). Each simulation may override it, height field included (Wave Sims)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveDamping",
+    "type": "float",
+    "default": "0.02f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Damping of every wave (User.Wave.Damping, 1/s on the surface's vertical speed): 0.02 lets rings cross a pool."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveSpongeCm",
+    "type": "float",
+    "default": "300.f",
+    "category": "Waves",
+    "units": "cm",
+    "comment": "Width of the absorbing band at an open simulation window's edge (User.Wave.SpongeCm): waves running out of the window fade there instead of coming back in. Used only where Wave Edge Open is on. The bodies' own fields use the same width."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWaveEdgeOpen",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "The simulation window's border is open water (User.Wave.EdgeOpen 1: waves leave through the sponge), or a wall that reflects them (0, a walled pool). Each simulation may override it (Wave Sims)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveWallAbsorption",
+    "type": "float",
+    "default": "0.4f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Where a simulation's window border is a wall: how strongly it takes energy out of the waves reaching it (User.Wave.WallAbsorption, 1/s on the water's motion within Wave Wall Band of the wall), as a pool's gutter or skimmer does: a wall gives back most of a wave, not all of it. 0.4 returns about 80% of a 2 m wave's height. 0: the walls give back everything, and a closed basin keeps every wave (a floater's own waves then build up in it over minutes). The bodies' own fields use the same. Each simulation may override it."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveWallBandCm",
+    "type": "float",
+    "default": "50.f",
+    "category": "Waves",
+    "units": "cm",
+    "comment": "Width of the band along a walled window border that Wave Wall Absorption acts in (User.Wave.WallBandCm)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveShoreDepthCm",
+    "type": "float",
+    "default": "10.f",
+    "category": "Waves",
+    "units": "cm",
+    "comment": "Water shallower than this absorbs waves, more the shallower (a beach) (User.Wave.ShoreDepthCm)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveBreakingSlope",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Waves steeper than this slope (rise over run, cell to cell) break, and so do crests higher than 0.6 of the depth (User.Wave.BreakingSlope). 1.0: a safety net for the cell-sized spikes and columns a bad source makes (slopes of several), not a Stokes limit. At 0.4 it damped the near wake of any hull with vertical topsides (a row boat's convex hull steps from its draft to nothing at the waterline, and the linear wake of that step is steeper than 0.4 over much of the water around and behind it), and the towed row boat's Kelvin wake came out at 0.52 of the exact linear wake; at 1.0 it reads 1.00-1.03 (the bench's ripple-kelvin). Leaving the cells near a hull out of the judgement does not help: the steep water is the wake itself."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveHyperviscosity",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Damping of the shortest waves the grid carries (User.Wave.Hyperviscosity, 1/s at the grid's finest wavelength, falling as k⁴ for longer ones): keeps the cell-sized ripples a hull's sharp side makes from ringing."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveCurrentCoupling",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "How much FluidNinja's current carries the waves (User.Wave.CurrentCoupling): 1 sweeps them down the creek with the water, 0 leaves them in still water."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveFeelScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "κ: how much of the waves the floating bodies feel (times each body's own Wave Feel Scale). 1 is physical; 0 floats them on FluidNinja's own surface (the waves are still made and drawn)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bRadiationDamping",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "The drag of each body's own waves, put back in every physics step (heave, roll and pitch, from its rest footprint at each motion's natural frequency), since what a body feels has its own waves taken out. Off: a body loses only what the other waves take from it, and bobs on for longer."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveAddedMassScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "The water each body drags along as it heaves, rolls and pitches (its added mass, from its rest footprint on the simulation's cells by strip theory: ρ π B² / 8 per unit length of the footprint, times L / (L + B) for its ends; roll and pitch from the same strips by their arm squared), scaled by this. The body responds as the heavier system (a crate's heave period lengthens by about a third, a ball's by more) and its radiation damping is worked out at that slower frequency. 1 is physical; 0 none. Stable Steps carry it (the force is rewritten so the physics solver's own step lands where the heavier body's would): with Stable Steps off it does nothing."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWaveDepthFromGround",
+    "type": "bool",
+    "default": "false",
+    "category": "Waves",
+    "units": "",
+    "comment": "The bodies' own fields take the water's depth under each body from the ground below it (a trace down from the water), at most Wave Depth (or the simulation's override), as the core does with its landscape height field and Clamp Height Lower Values on: beds flattened by the clamp run at Wave Depth, only shallower ones at their own. Off: Wave Depth everywhere, as the core does with the height field off. Where the trace finds no ground, Wave Depth too. Off by default: a trace often meets a water mesh with collision at the surface and reads a depth of 1 cm."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWaveDisplacement",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "Source 1: each hull's static head, how deep it sits below the wave-free surface (open interiors included); its motion makes the impact rings, bow waves and the Kelvin wake."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bWaveImpulse",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "Source 2: the slam and drag that stop a hull push the same impulse into the water, equal and opposite (the Cauchy–Poisson impulse problem)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveImpulseScale",
+    "type": "float",
+    "default": "0.35f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Scales the impulse source. The static head already radiates a falling body's waves; the slam and drag impulses add the part a linear field misses, and at 1 they counted the same water twice (impulse rings 2 to 3 times Evers' measurements). 0.35 matches the first crests of the ripple-evers bench."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveSourceSmoothCm",
+    "type": "float",
+    "default": "10.f",
+    "category": "Waves",
+    "units": "cm",
+    "comment": "The impulses are spread over a Gaussian this wide (σ), or three times the σ of the piece of hull each came from if that is wider, at most sixteen wave cells (under a quarter of a cell: bilinear between the four nearest cells). The impulse each puts in is unchanged."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "MaxWaveImpulses",
+    "type": "int32",
+    "default": "32768",
+    "category": "Waves",
+    "units": "",
+    "comment": "The most impulse pieces (one per wet hull piece per physics step, all bodies) sent to the waves in a frame. Past it, each body's neighbouring pieces pressing the same way are merged into one at their centre (in squares of a wave cell, doubled until they fit), so the frame's whole impulse and where it lands are kept; this is logged once. 0 sends none."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bFoam",
+    "type": "bool",
+    "default": "true",
+    "category": "Waves",
+    "units": "",
+    "comment": "The foam channel (needs a core at interface version 4): whitecaps where waves break, wake trails a moving hull's waterline sheds and impact rings where something lands, accumulated by the core per wave cell and drawn by the surface material; never fed back into the waves. Off: the core accumulates none and the surfaces stay clean; the waves are identical either way. fnb.Waves.Foam is the tiers' switch."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FoamDecay",
+    "type": "float",
+    "default": "0.7f",
+    "category": "Waves",
+    "units": "",
+    "comment": "How fast the foam fades (User.Wave.FoamDecay, 1/s): 0.7 is an e-fold in about 1.4 s, a boat's trail gone in about 1.5 s."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FoamBreaking",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Scale of the foam breaking waves make (User.Wave.FoamBreaking): the breaking decay times the water's speed. The whitecaps."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FoamWake",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Scale of the foam a moving hull's waterline sheds (User.Wave.FoamWake): its static head's edge times its speed through the water. The wake trails and bow foam."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "FoamImpact",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "Scale of the foam an impulse makes (User.Wave.FoamImpact): slams, Add Water Impulse, pokes and swimmer strokes. The impact rings."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveHeightScaleParameter",
+    "type": "FName",
+    "default": "TEXT(\"WaveHeightScale\")",
+    "category": "Waves",
+    "units": "",
+    "comment": "The surface material's scalar that scales the drawn wave height (MF_NinjaOutput_BaseFunction_SURFACE's WaveHeightScale): set to 0 on the captured surfaces' dynamic materials while the Surface Mirror is drawn, so the mirror shows FluidNinja's own surface W, and put back right after."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveNormalScaleParameter",
+    "type": "FName",
+    "default": "TEXT(\"WaveNormalScale\")",
+    "category": "Waves",
+    "units": "",
+    "comment": "The surface material's scalar that scales how far the waves bend the drawn normal (MF_NinjaOutput_BaseFunction_SURFACE's WaveNormalScale): set on each simulation's surface dynamic materials (Wave Normal Scale Factor, or the simulation's override)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveNormalScaleFactor",
+    "type": "float",
+    "default": "1.f",
+    "category": "Waves",
+    "units": "",
+    "comment": "A simulation's surfaces get WaveNormalScale = this / (0.005 × its size in cm): 0.1 on a 20 m pool, 0.025 on an 80 m river, which keeps the drawn normal true to the waves' slope whatever the simulation's size."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "PressureBufferParameter",
+    "type": "FName",
+    "default": "TEXT(\"PressureDivergenceBuffer\")",
+    "category": "Waves",
+    "units": "",
+    "comment": "The surface material's texture parameter holding the simulation's pressure buffer (RT_PressureDivergence): on a wave simulation its B is the drawn wave height η + P and its A the static head P. Its size gives the wave cells (the simulation's size / its width). It is read only once the core has made it RGBA16F (a stock RG16F one has no B, and its A reads 1)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "WaveSims",
+    "type": "TArray<FFluidNinjaWaveSimSettings>",
+    "default": "Constructor / empty",
+    "category": "Waves",
+    "units": "",
+    "comment": "Per simulation: overrides by NinjaLive actor name (its name or label), for a walled pool or a simulation of its own depth. Two ship for the demo level (FNB_DemoPool): Pool_FluidNinja, a closed pool 4 m deep, and River_FluidNinja, a river lane 3 m deep. A NinjaLive actor carrying a FluidNinja Wave Sim component (UFluidNinjaWaveSimComponent) is set up by that component instead, and an entry here naming it is ignored (logged once)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bSwimmerWaves",
+    "type": "bool",
+    "default": "true",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Swimmers push the water aside (FluidNinja Waves' static head, as a hull's): the player's pawn by its capsule, upright, and each registered swimmer by its head, chest and hips, so swimming, wading and jumping in make waves. A pawn whose capsule has no collision (seated in a boat, a boarding clip) makes none. Needs Waves."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerVolumeLitres",
+    "type": "float",
+    "default": "76.f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "The swimmer's own volume, litres: the most water it pushes aside. Its capsule holds several times that (35 cm in radius and 180 cm tall: about 600 L, some 440 L of it under water while swimming), so the capsule's static head is scaled to take in at most this much. 76 L is a 75 kg swimmer at the human body's mean density, about 985 kg/m³ (75 / 985 m³)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bSwimmerContacts",
+    "type": "bool",
+    "default": "true",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Swimmers' hands, forearms, feet and head (a diver's whole body) splash where they go into the water and press a ring into it (FluidNinja Waves), sized by how big they are and how fast they go in; feet kicking just under the surface churn it. The player's pawn (its skeletal mesh, while it is in the water) and every swimmer registered with UFluidNinjaBuoyancySubsystem::RegisterSwimmer (an AI swimmer or diver, say) take part. The splash is the project default (Effects → Splash System)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bPlayerContacts",
+    "type": "bool",
+    "default": "true",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "The player's pawn makes body-part splashes and rings too. Off: only registered swimmers do (turn it off if the pawn's own swim animation already spawns stroke splashes)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerEntryMinCmS",
+    "type": "float",
+    "default": "60.f",
+    "category": "Swimmers",
+    "units": "cm/s",
+    "comment": "A body part going in slower than this (straight down) makes no splash and no ring."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerSplashScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Scales the body parts' splashes (1: the splash a slam of the same power would make, Splash Reference Watts)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerImpulseScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Scales the body parts' impulses into the waves (1: the part's added mass times the speed it goes in at)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerCavitySeconds",
+    "type": "float",
+    "default": "0.35f",
+    "category": "Swimmers",
+    "units": "s",
+    "comment": "A part going in less than this long after another part of the same swimmer went in nearby (Swimmer Cavity Cm) enters the air pocket that one opened: a third of the splash and half the impulse. A pencil or head-first entry stays small (its body follows its feet or hands into their hole); a tuck, its hips and feet slapping in side by side at once, does not."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerCavityCm",
+    "type": "float",
+    "default": "30.f",
+    "category": "Swimmers",
+    "units": "cm",
+    "comment": "How near (across the surface) a part must go in to another's entry to enter its air pocket (Swimmer Cavity Seconds)."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerKickDepthCm",
+    "type": "float",
+    "default": "25.f",
+    "category": "Swimmers",
+    "units": "cm",
+    "comment": "Feet moving up and down at most this deep under the surface churn it (a flutter kick), more the nearer they are."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerStrokeScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Scales the strokes' push on the water (FFluidNinjaSwimmerPose::StrokeImpulse, the FluidNinja Swimmer component's Add Stroke Impulse): the wake point a stroke writes into FluidNinja's point input and the small impulse it presses into the waves. 0: strokes do nothing."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "bSwimmerWakes",
+    "type": "bool",
+    "default": "true",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Swimmers write their push through the water into FluidNinja's point input as moving brush points (the Wake Data Channel, as the floating bodies' wakes), and a ring pushing outward where they plunge in. The player's pawn while its Character Movement swims over a water volume (wading: at each foot), and every registered swimmer in its water; either leaves the surface alone once its top is 50 cm under it. FluidNinja ignores points slower than about 40 cm/s, and a faster point paints dye that speeds a river up along its flow: at the default gain only the plunge ring and fast swimming against a current reach the water (Docs/FluidNinjaWaves.md, Wakes and the current). Needs no modified FluidNinja core. fnb.Buoyancy.Wake 0 turns these off with the floating bodies' wakes."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerWakeStrength",
+    "type": "float",
+    "default": "0.35f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "The wake's target: the current plus this share of the swimmer's speed through the water (a hull's Wake Strength). Each frame the wake writes Swimmer Wake Gain of what the water at the swimmer still lacks of it."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerWakeGain",
+    "type": "float",
+    "default": "0.2f",
+    "category": "Swimmers",
+    "units": "",
+    "comment": "Share of what the water at a swimmer still lacks of the target that the wake writes each frame (a hull's Wake Gain). FluidNinja ignores points under about 40 cm/s; above that it drives the water to about 2.3 times the written speed in still water and speeds a river up along its flow. Measured in the demo: at 0.2 a 3 m/s swimmer leaves no wake in still water, and swimming upstream speeds the river up around it by 1 to 1.3 m/s; at 0.6 still water shows a wake (about 0.5 m/s just behind the swimmer), but a river speeds up around a swimmer that only holds its place."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerWakeSizeCm",
+    "type": "float",
+    "default": "70.f",
+    "category": "Swimmers",
+    "units": "cm",
+    "comment": "Brush size of a swimmer's wake (it grows a little with speed). Wading uses two thirds of it at each foot, a plunge 1.2 times it."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerWakeMinSpeedCmS",
+    "type": "float",
+    "default": "15.f",
+    "category": "Swimmers",
+    "units": "cm/s",
+    "comment": "A swimmer moving slower than this through the water leaves no wake."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerCurrentRingInnerCm",
+    "type": "float",
+    "default": "70.f",
+    "category": "Swimmers",
+    "units": "cm",
+    "comment": "The current a swimmer is in is read on a ring around it, not under it, where its own wake is: from this far... The wakes read it there (they push only what the water around them lacks), and so does UFluidNinjaBuoyancySubsystem::GetCurrentAtLocation by default."
+  },
+  {
+    "owner": "Project settings",
+    "source": "S5",
+    "name": "SwimmerCurrentRingOuterCm",
+    "type": "float",
+    "default": "160.f",
+    "category": "Swimmers",
+    "units": "cm",
+    "comment": "...to this far (at least 10 cm past the inner radius)."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "bWaves",
+    "type": "bool",
+    "default": "true",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "This simulation makes waves. Off: it runs none (User.WaveSimEnabled false) and its floaters feel FluidNinja's own surface."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "DepthCm",
+    "type": "float",
+    "default": "200.f",
+    "category": "FluidNinja Waves",
+    "units": "cm",
+    "comment": "This simulation's water depth for the waves everywhere in it (User.Wave.DepthCm), instead of the project's Wave Depth and of the depth FluidNinja's height field would give: the waves slow and steepen in shallow water. Read only while Depth From Bed is off."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "bDepthFromBed",
+    "type": "bool",
+    "default": "false",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "The core takes the depth from FluidNinja's height field where it has one (water Z minus its bed, User.Wave.DepthFromBed), and the project's Wave Depth where it has none; Depth Cm is then not used. Off (the default): Depth Cm everywhere, for a pool or channel whose height field reads its water surface rather than its floor."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "bWalled",
+    "type": "bool",
+    "default": "false",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "A closed basin: the simulation window's border is a wall that reflects the waves (User.Wave.EdgeOpen 0) and takes energy out of them within Wall Band of it at Wall Absorption, as a pool's gutter does. Off: open water, where waves leave through the sponge."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "WallAbsorption",
+    "type": "float",
+    "default": "0.4f",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "How strongly a walled border takes energy out of the waves reaching it (User.Wave.WallAbsorption, 1/s on the water's motion within Wall Band of the wall): 0.4 returns about 80% of a 2 m wave's height; 0 returns everything, and a closed basin then keeps every wave a floater makes."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "WallBandCm",
+    "type": "float",
+    "default": "50.f",
+    "category": "FluidNinja Waves",
+    "units": "cm",
+    "comment": "Width of the band along a walled border that Wall Absorption acts in (User.Wave.WallBandCm)."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "ScaleDownOverride",
+    "type": "int32",
+    "default": "0",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "The wave grid's scale-down for this simulation, 1, 2 or 4 (User.Wave.ScaleDown): its waves run on its pressure buffer's cells over this, so a tick costs a quarter at 2 and a sixteenth at 4, and the waves are drawn that much coarser. 0: the console variable fnb.Waves.ScaleDown, which the quality tiers (sg.WaterQuality) set."
+  },
+  {
+    "owner": "Simulation component",
+    "source": "S14",
+    "name": "Importance",
+    "type": "float",
+    "default": "1.f",
+    "category": "FluidNinja Waves",
+    "units": "",
+    "comment": "How much this simulation matters when fnb.Waves.MaxActiveSims keeps only the simulations nearest the camera running waves: its distance from the camera is divided by this before the simulations are ranked, so at 2 it counts as half as far away (the player's pool over a distant pond)."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "Description",
+    "type": "FText",
+    "default": "Constructor / empty",
+    "category": "Preset",
+    "units": "",
+    "comment": "A line for the menu and the details panel: what this preset makes of an object."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "Hull",
+    "type": "EFluidNinjaPresetHull",
+    "default": "EFluidNinjaPresetHull::FromCollision",
+    "category": "Hull",
+    "units": "",
+    "comment": "How the hull is built from the object's mesh."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "HullResolutionCm",
+    "type": "float",
+    "default": "25.f",
+    "category": "Hull",
+    "units": "cm",
+    "comment": "From Collision: the hull surface's resolution (cm). Finer follows the shape better and costs more per step."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "VoxelCount",
+    "type": "int32",
+    "default": "64",
+    "category": "Hull",
+    "units": "",
+    "comment": "Voxels: how many cubes fill the collision."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SphereCount",
+    "type": "int32",
+    "default": "8",
+    "category": "Hull",
+    "units": "",
+    "comment": "Sphere Row and Sphere Ring: how many spheres."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SphereRadiusScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Hull",
+    "units": "",
+    "comment": "The spheres' radius, as a multiple of the radius fitted to the object (One Sphere: the mean of its three half-extents; a row: the object's thinner half-extent; a ring: half the tube's thickness)."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "Mass",
+    "type": "EFluidNinjaPresetMass",
+    "default": "EFluidNinjaPresetMass::Density",
+    "category": "Mass",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "DensityKgM3",
+    "type": "float",
+    "default": "500.f",
+    "category": "Mass",
+    "units": "",
+    "comment": "Density: what the object is made of, kg/m³ (water 1000; pine 500, cork 240, ice 917, iron 7800; a beach ball about 8). Above 1000 it sinks."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "RestDraftCm",
+    "type": "float",
+    "default": "10.f",
+    "category": "Mass",
+    "units": "cm",
+    "comment": "Rest Draft: how deep it floats at rest (cm)."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "Attitude",
+    "type": "EFluidNinjaPresetAttitude",
+    "default": "EFluidNinjaPresetAttitude::AsPlaced",
+    "category": "Balance",
+    "units": "",
+    "comment": "Which way up it rests."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "CentreOfMassShift",
+    "type": "float",
+    "default": "0.f",
+    "category": "Balance",
+    "units": "",
+    "comment": "Moves the centre of mass along the object's longest axis, as a share of its half-length (+0.3: a third of the way toward the axis' positive end). An arrow's steel head makes it float nose down; a bottle's base makes it stand up. 0 leaves it centred."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "bSettleOnStart",
+    "type": "bool",
+    "default": "true",
+    "category": "Balance",
+    "units": "",
+    "comment": "Put on the water at its rest draft and attitude when play starts, rather than dropped where it was placed."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "bSleepWhenSettled",
+    "type": "bool",
+    "default": "true",
+    "category": "Balance",
+    "units": "",
+    "comment": "Sleep once it has come to rest on still water, until something moves it or the water does."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "PressureDragLinear",
+    "type": "float",
+    "default": "0.3f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "PressureDragQuadratic",
+    "type": "float",
+    "default": "1.f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SuctionDragLinear",
+    "type": "float",
+    "default": "0.3f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SuctionDragQuadratic",
+    "type": "float",
+    "default": "0.5f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "AirDragCoefficient",
+    "type": "float",
+    "default": "0.8f",
+    "category": "Hydrodynamics",
+    "units": "",
+    "comment": ""
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "bSetInteraction",
+    "type": "bool",
+    "default": "false",
+    "category": "Water",
+    "units": "",
+    "comment": "Also set how the body stirs FluidNinja (Interaction). Off, the component keeps its project's default: a preset made for one project should not hand bodies to FluidNinja's tracking in a project whose NinjaLives do not track."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "Interaction",
+    "type": "EFluidNinjaBuoyancyInteraction",
+    "default": "EFluidNinjaBuoyancyInteraction::Wakes",
+    "category": "Water",
+    "units": "",
+    "comment": "The plugin's wakes, FluidNinja's own tracking (the modified core), or both."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "bWake",
+    "type": "bool",
+    "default": "true",
+    "category": "Water",
+    "units": "",
+    "comment": "Write wake points where the hull moves through the water (a light prop carried by the current should not)."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "bWetLine",
+    "type": "bool",
+    "default": "true",
+    "category": "Water",
+    "units": "",
+    "comment": "Show the wet line on the hull (the hull material needs MF_FNB_HullWetness)."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SplashMinWatts",
+    "type": "float",
+    "default": "20.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "A slam weaker than this (watts) makes no splash: the body's noise floor."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "MaxSplashStrength",
+    "type": "float",
+    "default": "12.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "The largest splash this body throws, on the project's splash scale."
+  },
+  {
+    "owner": "Preset asset",
+    "source": "S17",
+    "name": "SplashScale",
+    "type": "float",
+    "default": "1.f",
+    "category": "Spray",
+    "units": "",
+    "comment": "An art multiplier on every splash of this body."
+  }
+]

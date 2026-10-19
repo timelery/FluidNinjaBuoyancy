@@ -1,0 +1,1275 @@
+// FluidNinja Buoyancy: the sources of FluidNinja Waves, and each floating body's own field for the self-coupling fix. Dispatched from
+// FluidNinjaBuoyancyWaveSource.cpp; the runtime side is UFluidNinjaBuoyancyWaves (FluidNinjaBuoyancyWaves.cpp). Docs: Docs/FluidNinjaWaves.md (the
+// interface with the modified NinjaLiveCore).
+//
+// The source texture (User.WaveSourceTexture), W x (H + 1) RGBA32F over a simulation's export cells: texel (i, j), j < H, is the cell
+// whose lower-left corner is at world (OriginX + i·Cell, OriginY + j·Cell), with
+//   R  P, the static head (cm): the depth of the hull bottom below the wave-free surface, open interiors included, plus the sinkers'
+//      deep volume heads (DeepHeadCS, fnb.Waves.PlungeSource);
+//   G  y, the dynamic impulse head (cm·s): Σ I_down / (ρ·g·cell area) over the frame;
+//   B  1 where the core sets η = −P and v = 0 this frame (a teleport, a body first seen or gone), else 0;
+//   A  the pressing hull's speed through the water (cm/s, the fastest body per cell): the core's waterline foam (interface version 4);
+// and the header row j = H: texel (0, H) = (OriginX, OriginY, Cell, Serial), texel (1, H) = (TicksExpected, 0, 0, 0).
+//
+// Each body's self field is the core's own water driven only by that body's P and impulses: FluidNinja Waves' Wave Prepare and Wave
+// Step, ported line for line (the masked level-0 binomial, the Blur2 mip pyramid read through 4-fetch B-splines, the dispersion
+// weight table, hyperviscosity, damping, the open-edge sponge, shore and breaking decay, and the advection by FluidNinja's current),
+// on an N x N window of the simulation's own cells that follows the body by whole cells, with the core's obstacles and depth (its Wave
+// Aux target: mask, depth, drift per cell), an absorbing band at its own edge, and the core's tick count. So its walls, rocks and banks
+// reflect the body's waves exactly as the core's do, and B − B_self is the waves of everything but the body, reflections of its own
+// included. Its B_self = η + P goes into a tile of the self-field atlas, where the gather reads it beside the core's B at the same
+// points: a floating body feels W + κ·(B − B_self).
+//
+// The self fields run in batches: every self field of one size and one simulation in one dispatch per pass (thread group z is the
+// field's place in the batch). Their state lives in pools, one per size: a slot of N x N cells per field, row-major (j·N + i) within
+// the slot; their WaveOp is a texture array, a slice (with its own mips) per field, which the hardware samples exactly as it would a
+// lone N x N texture.
+//
+// Conventions: cell (i, j) is the cell centre at grid-relative ((i + 0.5)·Δ, (j + 0.5)·Δ): i along +X, j along +Y. Lengths are cm,
+// times s, masses kg (Unreal units).
+
+#include "/Engine/Public/Platform.ush"
+
+static const float FluidNinjaWavePi = 3.14159265358979;
+static const float FluidNinjaWaveNoWater = -1.0e30;
+// float4 per body in BodyData (WaveBodyStride in FluidNinjaBuoyancyWaveSource.cpp).
+static const uint FluidNinjaWaveBodyStride = 7;
+// Threads sharing one cell's hull triangles in the raster (WaveRasterLanes in FluidNinjaBuoyancyWaveSource.cpp).
+#define FNB_WAVE_RASTER_LANES 64
+// The widest impulse splat, σ in cells (WaveSplatMaxSigmaCells in FluidNinjaBuoyancyWaveSource.cpp).
+#define FNB_WAVE_SPLAT_MAX_SIGMA 16.0
+// An impulse is spread over this many times its piece's own σ (a disc of its area: r / 2).
+#define FNB_WAVE_SPLAT_SPREAD 3.0
+// int4 per self field in SelfInfo (WaveSelfInfoStride in FluidNinjaBuoyancyWaveSource.cpp).
+static const uint FluidNinjaWaveSelfInfoStride = 3;
+// float4 per deep head in DeepData (WaveDeepStride in FluidNinjaBuoyancyWaveSource.cpp).
+static const uint FluidNinjaWaveDeepStride = 3;
+// The deep head's image pairs (the flat bed's reflections, alternating in sign), the first two of them exact.
+#define FNB_WAVE_DEEP_IMAGES 12
+#define FNB_WAVE_DEEP_EXACT_IMAGES 2
+// Self field flags (SelfInfo[0].y): new (still water, nothing pending, no P), recentred (state and pending impulse from the shift
+// buffers), sources this frame (P cleared for the raster), reset (nothing pending).
+static const uint FluidNinjaWaveSelfNew = 1;
+static const uint FluidNinjaWaveSelfMoved = 2;
+static const uint FluidNinjaWaveSelfSources = 4;
+static const uint FluidNinjaWaveSelfReset = 8;
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Parameters. Each pass binds the subset its C++ parameter struct lists.
+
+// The grid: a simulation's export cells, or one body's self field (N x N).
+int2 GridSize;               // cells along x, y
+float CellCm;                // Δ, cm
+
+// Raster. Per body, FluidNinjaWaveBodyStride float4 in BodyData (rotation rows with the translation in w: x, y grid-relative, z absolute;
+// Bounds: the grid-relative XY box; Extra: capsule radius, capsule half-height with the caps, the water it floats on where the Surface
+// Mirror has none, P's multiplier; Capture: the Surface Mirror's grid-relative centre in xy, MaxHead, SubmergeFade; Speed: the hull's
+// speed through the water in x, cm/s, for the source texture's A) and two uint4 in BodyInfo ((first triangle, triangles, kind, pool slot
+// of a self field), (box min column, row, columns, rows)). Triangles: three float4 per triangle, body-local cm, wound so
+// cross(v1 - v0, v2 - v0) points out of the hull.
+StructuredBuffer<float4> BodyData;
+StructuredBuffer<uint4> BodyInfo;
+StructuredBuffer<float4> Triangles;
+int NumBodies;
+Texture2D<float> CaptureTexture;  // the Surface Mirror (R32F scene depth), drawn without the waves
+int HasCapture;
+float CaptureTexel;          // cm per texel
+int CaptureSize;             // texels across
+float CaptureTop;            // capture Z, cm
+float CaptureFar;            // depths at or beyond this: nothing drawn
+int Controlled;              // 1: flat controlled water at ControlledHeight
+float ControlledHeight;      // cm
+RWTexture2D<uint> HeadOut;   // P (cm) as float bits, the deepest body per cell
+RWTexture2D<uint> SpeedOut;  // the pressing hull's speed through the water (cm/s) as float bits, the fastest body per cell
+
+// Impulse splat: (x, y grid-relative, I_down kg·cm/s, projected area cm²), in signed fixed point.
+StructuredBuffer<float4> Impulses;
+int NumImpulses;
+float ImpulseFixedScale;     // fixed-point units per kg·cm/s
+float SmoothCells;           // σ of the splat in cells, at least (a piece's own size may widen it; below 0.25 the splat is bilinear)
+RWTexture2D<uint> ImpulseRW; // signed fixed point (asint)
+
+// Pokes (test bench): (x, y grid-relative, head cm, sigma cm): a Gaussian pressure head pressing for PokeSeconds.
+StructuredBuffer<float4> Pokes;
+int NumPokes;
+float PokeToFixed;           // head cm -> fixed-point units of a cell: PokeSeconds · ρ · g · Δ² · ImpulseFixedScale
+
+// Deep heads (fnb.Waves.PlungeSource). Per sinker, FluidNinjaWaveDeepStride float4 in DeepData: (the equivalent rectangle's centre x, y
+// grid-relative cm, the cosine and sine of its first axis), (its half extents along and across that axis cm, the depths of its column's
+// top and bottom below the wave-free surface cm), (the depth h the waves run at under it cm, P's multiplier, where the taper starts and
+// where it ends, cm from the centre); and one uint4 in DeepInfo, its cell box (min column, min row, columns, rows).
+StructuredBuffer<float4> DeepData;
+StructuredBuffer<uint4> DeepInfo;
+int NumDeep;
+float DeepFixedScale;        // fixed-point units per cm of P
+RWStructuredBuffer<uint> DeepOut;    // Σ deep heads per cell (row-major), signed fixed point (asint)
+
+// Assemble.
+Texture2D<uint> HeadIn;      // P bits
+Texture2D<uint> SpeedIn;     // the pressing hull's speed bits (the source texture's A)
+Texture2D<uint> ImpulseIn;   // signed fixed point
+StructuredBuffer<uint> DeepIn;       // Σ deep heads per cell (row-major), signed fixed point; read only when HasDeep is 1
+int HasDeep;
+float DeepToCm;              // fixed-point units -> cm: 1 / DeepFixedScale
+StructuredBuffer<int4> EraseBoxes;   // cells (min x, min y, max x, max y), inclusive
+int NumErase;
+int EraseAll;
+float ImpulseToHead;         // fixed-point units of a cell -> y (cm·s): 1 / (ImpulseFixedScale · ρ · g · Δ²)
+float4 Header0;              // (OriginX, OriginY, Cell, Serial)
+float4 Header1;              // (TicksExpected, 0, 0, 0)
+RWTexture2D<float4> SourceOut;
+
+// Self fields in a batch (GridSize is N x N). Per field, FluidNinjaWaveSelfInfoStride int4 in SelfInfo: (pool slot, flags, atlas tile x, y),
+// (Wave Aux cell x, y of its cell (0, 0), the depth outside the simulation's window and its own sponge width, both as float bits),
+// (place in the shift buffers, shift x, y, 0).
+StructuredBuffer<int4> SelfInfo;
+// The pools: (η, v), P bits and the pending impulse (signed fixed point) per cell, a slot of N x N cells per field.
+StructuredBuffer<float2> StatePoolIn;
+RWStructuredBuffer<float2> StatePool;
+StructuredBuffer<uint> HeadPoolIn;
+RWStructuredBuffer<uint> HeadPool;
+StructuredBuffer<uint> ImpulsePoolIn;
+RWStructuredBuffer<uint> ImpulsePool;
+// Recentring: the fields moved by whole cells this frame, a slot each (out(i, j) = in(i + shift x, j + shift y)).
+StructuredBuffer<float2> ShiftStateIn;
+RWStructuredBuffer<float2> ShiftStateOut;
+StructuredBuffer<uint> ShiftImpulseIn;
+RWStructuredBuffer<uint> ShiftImpulseOut;
+StructuredBuffer<uint> ImpulseSlots;    // per impulse: its field's pool slot
+RWTexture2D<float> SelfTileOut;      // the self-field atlas (R16F): B_self = η + P
+
+// Self field step: one of the core's ticks (Wave Prepare, the WaveOp mips, Wave Step).
+float HeadPerUnit;           // fixed-point units of a cell -> P_dyn (cm): 1 / (ImpulseFixedScale · ρ · g · Δ² · Ticks · dt)
+Texture2D<float4> AuxTexture;        // the core's Wave Aux target: (m, depth cm, drift x, drift y in cells per tick) per simulation cell
+int2 SimCells;               // the simulation's cells across
+int EdgeOpen;                // 1: the simulation's window border is open (with its sponge), 0: a wall
+RWTexture2DArray<float4> WaveOpOut;  // WaveOp mip 0: (s·m, m, v·m, η·m), s = η + P + P_dyn
+Texture2DArray<float4> MipIn;        // the mip below (generation), one level
+int2 MipInSize;
+int2 MipOutSize;
+RWTexture2DArray<float4> MipOut;
+Texture2DArray<float4> WaveOp;       // every mip (the step)
+SamplerState WaveOpSampler;          // bilinear, clamped
+float Damping;               // 1/s on v (Wave.Damping)
+float Hyperviscosity;        // 1/s (Wave.Hyperviscosity)
+float SimSpongeCm;           // the core's open-edge sponge, cm (Wave.SpongeCm)
+float WallAbsorption;        // 1/s within WallBandCm of a walled window border (Wave.WallAbsorption)
+float WallBandCm;            // Wave.WallBandCm
+float ShoreDepthCm;          // Wave.ShoreDepthCm
+float BreakingSlope;         // Wave.BreakingSlope
+float MeanRelax;             // 1/s: the field's mean s relaxed toward 0 each tick, the k = 0 mode kill (fnb.Waves.SelfMeanRelax, not the core's Wave.MeanRelax; 0 off)
+int TopMip;                  // WaveOp's last level (one texel per field: the window's means); levels the field lacks read it
+float TickSeconds;           // one fixed tick of the core, s
+float SpongeRate;            // 1/s at the self field window's very edge (its band's width is per field, in SelfInfo)
+
+// Probes and stats on the core's output (RT_PressureDivergence: B = η + P in z, A = P in w).
+Texture2D<float4> PressureTexture;
+StructuredBuffer<float2> ProbePoints;        // grid-relative cm
+StructuredBuffer<int> ProbeSlots;            // where each goes in ProbeValues
+int NumProbes;
+RWStructuredBuffer<float> ProbeValues;       // B, cm
+RWStructuredBuffer<float4> StatsPartials;    // per 16 x 16 group: (Σ(B − A), Σ(B − A)², ΣA, max |B − A|)
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Helpers.
+
+bool InsideGrid(int2 Cell)
+{
+	return all(Cell >= 0) && all(Cell < GridSize);
+}
+
+// Grid-relative centre of a cell, cm.
+float2 CellCentre(int2 Cell)
+{
+	return (float2(Cell) + 0.5) * CellCm;
+}
+
+bool InsideBox(float2 P, float4 Box)
+{
+	return P.x >= Box.x && P.y >= Box.y && P.x <= Box.z && P.y <= Box.w;
+}
+
+// Texel coordinates of a grid-relative point in a top-down capture looking straight down (pitch -90, yaw 0): column along +Y, row
+// along -X, as GatherFootprints maps the Surface Mirror. Map = (centre x, y, texel cm, texels across).
+float2 TopDownTexel(float2 P, float4 Map)
+{
+	return float2((P.y - Map.y) / Map.z + Map.w * 0.5 - 0.5, Map.w * 0.5 - (P.x - Map.x) / Map.z - 0.5);
+}
+
+bool InsideMap(float2 T, float Size)
+{
+	return all(T >= -0.5) && all(T <= Size - 0.5);
+}
+
+// The wave-free water at a grid-relative point, from the Surface Mirror (drawn this frame with the materials' WaveHeightScale at 0;
+// CaptureOrigin: its grid-relative centre): bilinear over the drawn texels only (depth inside (0, Far)), as SampleHeight in
+// FluidNinjaBuoyancyGather.usf, so a bank beside the water does not drag the height down. NoWater when under a third of the weight was drawn.
+float CapturedWater(float2 P, float2 CaptureOrigin)
+{
+	const float4 Map = float4(CaptureOrigin, CaptureTexel, float(CaptureSize));
+	const float2 T = TopDownTexel(P, Map);
+	if (!InsideMap(T, Map.w))
+	{
+		return FluidNinjaWaveNoWater;
+	}
+	const int2 P0 = int2(floor(T));
+	const float2 F = T - float2(P0);
+	float Weight = 0.0;
+	float Sum = 0.0;
+	[unroll]
+	for (int K = 0; K < 4; ++K)
+	{
+		const int2 O = int2(K & 1, K >> 1);
+		const int2 Q = clamp(P0 + O, int2(0, 0), int2(CaptureSize - 1, CaptureSize - 1));
+		const float Depth = CaptureTexture.Load(int3(Q, 0));
+		const float W = (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y);
+		if (Depth > 0.0 && Depth < CaptureFar)
+		{
+			Weight += W;
+			Sum += (CaptureTop - Depth) * W;
+		}
+	}
+	return Weight > 0.3 ? Sum / Weight : FluidNinjaWaveNoWater;
+}
+
+// Edge function of the projected edge A -> B at P (twice the signed area of A, B, P), evaluated in one canonical vertex order so the
+// edge's two triangles get exactly opposite values: a line through a shared edge then belongs to exactly one of them.
+float EdgeFunction(float2 A, float2 B, float2 P)
+{
+	const bool bOrdered = A.x < B.x || (A.x == B.x && A.y < B.y);
+	const float2 U = bOrdered ? A : B;
+	const float2 V = bOrdered ? B : A;
+	precise const float E = (V.x - U.x) * (P.y - U.y) - (V.y - U.y) * (P.x - U.x);
+	return bOrdered ? E : -E;
+}
+
+// Tie rule for a point exactly on edge A -> B of a counter-clockwise triangle: it belongs to the triangle when the edge runs down, or
+// exactly left. The reversed edge never passes, so of two triangles sharing an edge exactly one takes the point.
+bool TopLeftEdge(float2 A, float2 B)
+{
+	return B.y < A.y || (B.y == A.y && B.x < A.x);
+}
+
+bool Covers(float E, float2 A, float2 B)
+{
+	return E > 0.0 || (E == 0.0 && TopLeftEdge(A, B));
+}
+
+// A hull vertex in world orientation, relative to the body's translation: (x, y, z).
+float3 HullPoint(float3 Local, float4 Axis0, float4 Axis1, float4 Axis2)
+{
+	precise const float3 World = float3(dot(Axis0.xyz, Local), dot(Axis1.xyz, Local), dot(Axis2.xyz, Local));
+	return World;
+}
+
+// The core's Wave Aux at a self-field cell (AuxCell: the simulation cell of the field's cell (0, 0)): (m, depth, drift x, drift y).
+// Outside the simulation's window there is no core water: its border is a wall there (dry), or open water at the default depth with
+// no current.
+float4 SelfAux(int2 Cell, int2 AuxCell, float DefaultDepthCm)
+{
+	const int2 SimCell = AuxCell + Cell;
+	if (all(SimCell >= 0) && all(SimCell < SimCells))
+	{
+		return AuxTexture.Load(int3(SimCell, 0));
+	}
+	return float4(EdgeOpen != 0 ? 1.0 : 0.0, DefaultDepthCm, 0.0, 0.0);
+}
+
+// A self field's place in its pool: the first cell of its slot, and a cell's index within the slot.
+uint SlotBase(int Slot)
+{
+	return uint(Slot) * uint(GridSize.x) * uint(GridSize.y);
+}
+
+uint CellIndex(int2 Cell)
+{
+	return uint(Cell.y) * uint(GridSize.x) + uint(Cell.x);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Raster: P (cm), the static head of each body in each cell: where the cell's vertical line meets the hull, the depth of its lowest
+// crossing (the hull's bottom) below the wave-free surface, open interiors included (a row boat displaces as if filled to the water
+// line), at most the body's MaxHeadCm, times the body's multiplier; the deepest body per cell wins. Only where the column comes up
+// through the surface: a column whose top is under water lets go over its fade length. A body wholly under the surface is not sent
+// (the CPU leaves it out: P = 0), except a rigid hull whose head is being released (fnb.Waves.SubmergeRelease): the CPU sends it
+// lifted back to the height its top had above the water when it went under, with the cap it had then and a multiplier falling as
+// e^(-t/tau), so its columns press what they pressed then, fading in time rather than in one tick.
+// A thread group is one cell of one body: group z is the body, x, y the cell in that body's cell box (clamped to the grid on the CPU),
+// and its FNB_WAVE_RASTER_LANES threads share the hull's triangles (thread k takes triangles k, k + lanes, ...). The lowest
+// crossing and the number of crossings are then reduced in group memory: a minimum and a sum, the same in any order, so P is exactly
+// what one thread looping over every triangle finds.
+
+groupshared float RasterBottom[FNB_WAVE_RASTER_LANES];
+groupshared float RasterTop[FNB_WAVE_RASTER_LANES];
+groupshared uint RasterHits[FNB_WAVE_RASTER_LANES];
+
+// One cell of one body. Every thread of the group calls it (it synchronises the group); true in thread 0 when the body presses the cell,
+// with the cell, its head, and the body's speed through the water (BodyData, uniform over the body: the foam's waterline shear).
+bool RasterCell(uint3 GroupId, uint Lane, out int2 Cell, out float Head, out float Speed)
+{
+	Cell = int2(0, 0);
+	Head = 0.0;
+	Speed = 0.0;
+	const uint Body = GroupId.z;
+	bool bActive = Body < uint(NumBodies);
+	uint4 Info = uint4(0, 0, 0, 0);    // first triangle, triangles, kind, pool slot
+	float4 Axis0 = float4(0.0, 0.0, 0.0, 0.0);
+	float4 Axis1 = float4(0.0, 0.0, 0.0, 0.0);
+	float4 Axis2 = float4(0.0, 0.0, 0.0, 0.0);
+	float4 Extra = float4(0.0, 0.0, 0.0, 0.0);
+	float2 CaptureOrigin = float2(0.0, 0.0);
+	float MaxHead = 0.0;
+	float SubmergeFade = 0.0;
+	float HalfThickness = 0.0;
+	float2 P = float2(0.0, 0.0);
+	if (bActive)
+	{
+		Info = BodyInfo[Body * 2];
+		const uint4 Box = BodyInfo[Body * 2 + 1];     // min column, min row, columns, rows
+		bActive = GroupId.x < Box.z && GroupId.y < Box.w;
+		Cell = int2(Box.xy + GroupId.xy);
+	}
+	bActive = bActive && InsideGrid(Cell);
+	if (bActive)
+	{
+		P = CellCentre(Cell);
+		const uint Base = Body * FluidNinjaWaveBodyStride;
+		Axis0 = BodyData[Base + 0];
+		Axis1 = BodyData[Base + 1];
+		Axis2 = BodyData[Base + 2];
+		const float4 Bounds = BodyData[Base + 3];
+		Extra = BodyData[Base + 4];
+		CaptureOrigin = BodyData[Base + 5].xy;
+		MaxHead = BodyData[Base + 5].z;
+		SubmergeFade = BodyData[Base + 5].w;
+		Speed = max(BodyData[Base + 6].x, 0.0);
+		HalfThickness = max(BodyData[Base + 6].y, 0.0);
+		bActive = InsideBox(P, Bounds);
+	}
+	const float3 Translation = float3(Axis0.w, Axis1.w, Axis2.w);
+
+	// The vertical line through the cell centre, at the body's own height so the numbers stay small: its lowest crossing of the hull.
+	float Bottom = 1.0e30;
+	float HullTop = -1.0e30;
+	uint Hits = 0;
+	if (bActive && Info.z == 0u)
+	{
+		// Triangle hull: each triangle projected on the world XY plane (relative to the translation), the point tested with exact edge
+		// functions, so a line through a shared edge or vertex crosses each layer of the hull exactly once.
+		const float2 Point = P - Translation.xy;
+		for (uint K = Lane; K < Info.y; K += FNB_WAVE_RASTER_LANES)
+		{
+			const uint First = (Info.x + K) * 3;
+			const float3 A = HullPoint(Triangles[First].xyz, Axis0, Axis1, Axis2);
+			const float3 B = HullPoint(Triangles[First + 1].xyz, Axis0, Axis1, Axis2);
+			const float3 C = HullPoint(Triangles[First + 2].xyz, Axis0, Axis1, Axis2);
+			// Each edge function weighs the vertex opposite it.
+			const float EA = EdgeFunction(B.xy, C.xy, Point);
+			const float EB = EdgeFunction(C.xy, A.xy, Point);
+			const float EC = EdgeFunction(A.xy, B.xy, Point);
+			const bool bExit = Covers(EA, B.xy, C.xy) && Covers(EB, C.xy, A.xy) && Covers(EC, A.xy, B.xy);
+			const bool bEntry = !bExit && Covers(-EA, C.xy, B.xy) && Covers(-EB, A.xy, C.xy) && Covers(-EC, B.xy, A.xy);
+			const float Sum = EA + EB + EC;
+			if ((!bExit && !bEntry) || Sum == 0.0)
+			{
+				continue;   // missed, or a wall standing parallel to the line
+			}
+			const float Crossing = (EA * A.z + EB * B.z + EC * C.z) / Sum;
+			Bottom = min(Bottom, Crossing);
+			HullTop = max(HullTop, Crossing);
+			++Hits;
+		}
+	}
+	RasterBottom[Lane] = Bottom;
+	RasterTop[Lane] = HullTop;
+	RasterHits[Lane] = Hits;
+	GroupMemoryBarrierWithGroupSync();
+	[unroll]
+	for (uint Stride = FNB_WAVE_RASTER_LANES / 2; Stride > 0; Stride /= 2)
+	{
+		if (Lane < Stride)
+		{
+			RasterBottom[Lane] = min(RasterBottom[Lane], RasterBottom[Lane + Stride]);
+			RasterTop[Lane] = max(RasterTop[Lane], RasterTop[Lane + Stride]);
+			RasterHits[Lane] = RasterHits[Lane] + RasterHits[Lane + Stride];
+		}
+		GroupMemoryBarrierWithGroupSync();
+	}
+	if (!bActive || Lane != 0)
+	{
+		return false;
+	}
+	Bottom = RasterBottom[0];
+	Hits = RasterHits[0];
+	// The column's top: a hull's highest crossing (every wave hull is a union of convex pieces, so a column inside it is solid up to there;
+	// a row boat's convex hull fills it to the gunwales), or the capsule's top.
+	float Top = RasterTop[0];
+	if (Info.z == 2u)
+	{
+		// Lying ellipsoid (a swimming body): semi-axes Extra.x along its facing (Axis' first column), Extra.y across, HalfThickness up;
+		// centred on the translation. Its depth tapers smoothly to nothing at its rim, as a body's does: the upright capsule seen from above
+		// is a disc with a vertical wall, a one-cell step from 0 to its whole column, which broke, spiked and threw short steep waves.
+		const float2 Offset = P - Translation.xy;
+		const float Along = dot(Offset, float2(Axis0.x, Axis1.x)) / max(Extra.x, 1.0);
+		const float Across = dot(Offset, float2(Axis0.y, Axis1.y)) / max(Extra.y, 1.0);
+		const float Inside = 1.0 - Along * Along - Across * Across;
+		if (Inside <= 0.0 || HalfThickness <= 0.0)
+		{
+			return false;
+		}
+		const float Half = HalfThickness * sqrt(Inside);
+		Bottom = -Half;
+		Top = Half;
+		Hits = 1;
+	}
+	else if (Info.z != 0u)
+	{
+		// Upright capsule (the swimmer): radius Extra.x, half-height with the caps Extra.y, centred on the translation.
+		const float Radius = Extra.x;
+		const float2 Offset = P - Translation.xy;
+		const float Across = dot(Offset, Offset);
+		if (Radius > 0.0 && Across < Radius * Radius)
+		{
+			Bottom = -max(Extra.y - Radius, 0.0) - sqrt(Radius * Radius - Across);
+			Top = max(Extra.y, Radius);
+			Hits = 1;
+		}
+	}
+	if (Hits == 0)
+	{
+		return false;
+	}
+
+	// The wave-free surface: the Surface Mirror (drawn without the waves), the body's own water where the mirror has no texel, or the
+	// test bench's flat controlled water.
+	float Surface = ControlledHeight;
+	if (Controlled == 0)
+	{
+		const float Captured = HasCapture != 0 ? CapturedWater(P, CaptureOrigin) : FluidNinjaWaveNoWater;
+		Surface = Captured > FluidNinjaWaveNoWater * 0.5 ? Captured : Extra.z;
+	}
+	const float S = Surface - Translation.z;
+	// A body presses what of it is under the surface. For the lying swimmer that is its own submerged thickness, never the water over it:
+	// swimming just under the surface, the column from the surface down to the body pressed a pit as deep as the swimmer was down, and
+	// the surface spiked over it. (A hull and the capsule keep the column; they let it go as their top goes under.)
+	Head = Info.z == 2u ? max(0.0, min(S, Top) - Bottom) : max(0.0, S - Bottom);
+	// A column with water over it presses nothing: at rest the surface over a sunken part is flat. The surface draws B = η + P, so a P
+	// pressed there would stand up as a column of glassy water beside the body (a log speared in at an angle, a sinking ball's shoulders,
+	// the hollow a ball leaves behind it). It lets go over its fade length as the column's top goes under (the capsule's radius unless the
+	// record says otherwise): a treading swimmer's hips, a metre down, press no pit into the water over them, nor does a diver.
+	Head *= saturate(1.0 - (S - Top) / max(SubmergeFade > 0.0 ? SubmergeFade : (Info.z != 0u ? Extra.x : 2.0 * CellCm), 1.0));
+	// No pit deeper than the body is wide.
+	if (MaxHead > 0.0)
+	{
+		Head = min(Head, MaxHead);
+	}
+	Head *= max(Extra.w, 0.0);
+	return Head > 0.0;
+}
+
+// A simulation's P: every body's head into its cells, and its speed through the water into the A accumulator (the foam's waterline shear).
+[numthreads(FNB_WAVE_RASTER_LANES, 1, 1)]
+void RasterCS(uint3 GroupId : SV_GroupID, uint Lane : SV_GroupIndex)
+{
+	int2 Cell;
+	float Head;
+	float Speed;
+	if (RasterCell(GroupId, Lane, Cell, Head, Speed))
+	{
+		// Non-negative floats order like their bits, so the deepest body (and the fastest) per cell wins.
+		InterlockedMax(HeadOut[Cell], asuint(Head));
+		InterlockedMax(SpeedOut[Cell], asuint(Speed));
+	}
+}
+
+// The self fields' P: each body into its own field's pool slot (BodyInfo[0].w). No speed: a self field carries no foam.
+[numthreads(FNB_WAVE_RASTER_LANES, 1, 1)]
+void SelfRasterCS(uint3 GroupId : SV_GroupID, uint Lane : SV_GroupIndex)
+{
+	int2 Cell;
+	float Head;
+	float Speed;
+	if (RasterCell(GroupId, Lane, Cell, Head, Speed))
+	{
+		InterlockedMax(HeadPool[SlotBase(int(BodyInfo[GroupId.z * 2].w)) + CellIndex(Cell)], asuint(Head));
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Impulse splat: each point's downward impulse (kg·cm/s) shared between the nearest cells in signed fixed point (integer atomics add up
+// the same whatever the order): over a Gaussian of σ = SmoothCells or the piece's own size, whichever is wider (at most
+// FNB_WAVE_SPLAT_MAX_SIGMA cells, normalised over the cells within 2.5 σ, so the impulse is kept whole), or bilinearly between the four
+// nearest below a quarter of a cell. Kept until a step consumes it.
+
+// bPool: into the pool slot from Base (a self field), else into ImpulseRW (a simulation).
+void AddUnits(int2 Cell, float Impulse, bool bPool, uint Base)
+{
+	const int Units = int(round(clamp(Impulse * ImpulseFixedScale, -1.0e9, 1.0e9)));
+	if (Units != 0)
+	{
+		if (bPool)
+		{
+			InterlockedAdd(ImpulsePool[Base + CellIndex(Cell)], asuint(Units));
+		}
+		else
+		{
+			InterlockedAdd(ImpulseRW[Cell], asuint(Units));
+		}
+	}
+}
+
+void SplatImpulse(float4 Impulse, bool bPool, uint Base)
+{
+	if (!(abs(Impulse.z) < 1.0e8) || !all(abs(Impulse.xy) < 1.0e8))
+	{
+		return;   // not a finite number
+	}
+	const float2 T = Impulse.xy / CellCm - 0.5;
+	// At least Wave Source Smooth wide, and wider than the piece of hull it came from (a disc of its projected area has σ = r / 2): the
+	// water a slam drives down is taken up around the patch out to about its radius again on every side, the crown it throws. Pressed
+	// into its own patch alone, the 56 cm wrecking ball's one piece dug a pit far deeper than wide that sprang back as a spike.
+	const float AreaSigma = Impulse.w > 0.0 ? FNB_WAVE_SPLAT_SPREAD * 0.5 * sqrt(Impulse.w / FluidNinjaWavePi) / CellCm : 0.0;
+	const float Sigma = min(max(SmoothCells, AreaSigma), FNB_WAVE_SPLAT_MAX_SIGMA);
+	if (Sigma >= 0.25)
+	{
+		const int Reach = int(ceil(2.5 * Sigma));
+		const int2 Nearest = int2(round(T));
+		float Total = 0.0;
+		for (int Y = -Reach; Y <= Reach; ++Y)
+		{
+			for (int X = -Reach; X <= Reach; ++X)
+			{
+				const float2 D = float2(Nearest + int2(X, Y)) - T;
+				Total += exp(-dot(D, D) / (2.0 * Sigma * Sigma));
+			}
+		}
+		for (int V = -Reach; V <= Reach; ++V)
+		{
+			for (int U = -Reach; U <= Reach; ++U)
+			{
+				const int2 Cell = Nearest + int2(U, V);
+				if (InsideGrid(Cell))
+				{
+					const float2 D = float2(Cell) - T;
+					AddUnits(Cell, Impulse.z * exp(-dot(D, D) / (2.0 * Sigma * Sigma)) / Total, bPool, Base);
+				}
+			}
+		}
+		return;
+	}
+	const int2 P0 = int2(floor(T));
+	const float2 F = T - float2(P0);
+	[unroll]
+	for (int K = 0; K < 4; ++K)
+	{
+		const int2 O = int2(K & 1, K >> 1);
+		const int2 Cell = P0 + O;
+		if (InsideGrid(Cell))
+		{
+			AddUnits(Cell, Impulse.z * (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y), bPool, Base);
+		}
+	}
+}
+
+[numthreads(64, 1, 1)]
+void SplatCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x < uint(NumImpulses))
+	{
+		SplatImpulse(Impulses[Id.x], false, 0u);
+	}
+}
+
+// The self fields' impulses, each into its field's pool slot (ImpulseSlots).
+[numthreads(64, 1, 1)]
+void SelfSplatCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x < uint(NumImpulses))
+	{
+		SplatImpulse(Impulses[Id.x], true, SlotBase(int(ImpulseSlots[Id.x])));
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Pokes (test bench): a Gaussian pressure head H·exp(-r²/(2σ²)) pressing on the water for PokeSeconds, as an impulse into y.
+
+[numthreads(8, 8, 1)]
+void PokeCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const float2 P = CellCentre(Cell);
+	float Add = 0.0;
+	for (int K = 0; K < NumPokes; ++K)
+	{
+		const float4 Poke = Pokes[K];
+		const float2 Offset = P - Poke.xy;
+		const float Sigma = max(Poke.w, 1.0e-3);
+		Add += Poke.z * exp(-dot(Offset, Offset) / (2.0 * Sigma * Sigma));
+	}
+	const int Units = int(round(clamp(Add * PokeToFixed, -1.0e9, 1.0e9)));
+	if (Units != 0)
+	{
+		InterlockedAdd(ImpulseRW[Cell], asuint(Units));
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Deep heads (fnb.Waves.PlungeSource): a sinking body's submerged volume carried up to the surface. In linear potential flow over depth h
+// a volume source q at depth z drives the free surface as η_tt + ω² η = ∂q/∂t · T(k, z), T = cosh(k (h − z)) / cosh(k h), the share of
+// its flux that reaches the surface over a no-flux bed. The core solves B_tt + Γ B_t + ω² B = P_tt with B = η + P, so a P that is the
+// volume distribution filtered by T makes B the surface of that source problem: both start at rest and obey the same equation. A body at
+// rest then presses a static P and radiates nothing (B → 0 over a sunk block, as over a real one), and wavelengths shorter than about
+// 2π z are filtered out of a source z deep, which the static head of a capped column could not do.
+//
+// The volume is a uniform column over the equivalent rectangle (half extents a, b; top z1, bottom z2), so in real space
+//   P = Scale / (2π) Σ_n w_n (−1)ⁿ [U(z1 + 2nh) − U(z2 + 2nh) + U(2(n + 1)h − z2) − U(2(n + 1)h − z1)],
+// T expanded as images: cosh(k (h − z)) / cosh(k h) = Σ (−1)ⁿ e^(−2nkh) [e^(−kz) + e^(−k (2h − z))], each e^(−kd) the surface kernel
+// d / (2π (r² + d²)^(3/2)) of a source d deep in deep water, integrated over the column's depths into the rectangle's Newtonian potential
+// U(d) = ∬ dx' dy' / √(X² + Y² + d²). U is exact (its four corners) for the first two image pairs, where the rectangle's size matters,
+// and the point form 4ab / √(r² + d²) beyond (12 m or more down: within 0.003 cm); the alternating sum is averaged three times over its
+// last terms (Euler's transform of order 3: weights 7/8, 1/2, 1/8), which takes the truncation's error under 0.01 cm and its volume error
+// to 0.1 %. As z2 → 0 this is exactly z2 times the rectangle, today's piercing column without the cap, so a body coming in has no step;
+// and its integral over the plane is exactly 4ab (z2 − z1) at any depth. Checked offline in float32 against the k-space
+// head on the GPU's own grid: within 0.01 cm outside the footprint, 0.14 cm at its edges while it pierces, its volume within 0.03 %; and
+// the bench's drop, run on the numpy port of Wave Step with this very head, kept all 54 Evers measures inside.
+// P is tapered as cos² from TaperStart to TaperEnd (4 h: the finite-depth kernel falls as e^(−π r / 2h), so 99.4 % of the volume lies
+// within it) and renormalised on the CPU for what the taper takes off. Each sinker is a thread group z; the cells of its box are x, y;
+// sources superpose, so each adds its P into DeepOut in signed fixed point (integer atomics add up the same whatever the order).
+
+// The Euler weights of the image sum's last three terms (order 3), 1 before them.
+static const float FluidNinjaWaveDeepWeight[FNB_WAVE_DEEP_IMAGES] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.875, 0.5, 0.125};
+
+// ln(Y + R) with R = √(Q2 + Y²), without the cancellation of Y + R where Y is negative ((R + Y)(R − Y) = Q2). Where Q2 and R − Y are both
+// 0 (a corner of the rectangle at the surface) the term it multiplies is 0 there, and the floor keeps it finite.
+float DeepLogPlus(float Y, float R, float Q2)
+{
+	return Y >= 0.0 ? log(max(Y + R, 1.0e-30)) : log(max(Q2, 1.0e-30) / max(R - Y, 1.0e-30));
+}
+
+// One corner of the rectangle's potential at height D: X ln(Y + R) + Y ln(X + R) − D atan(X Y / (D R)), in the atan2 form, which needs no
+// division by D (0 for a column that comes through the surface); at D = 0 that term is 0 (the atan2 of 0 by 0 is not defined everywhere).
+float DeepCorner(float X, float Y, float D)
+{
+	const float X2 = X * X;
+	const float Y2 = Y * Y;
+	const float D2 = D * D;
+	const float R = sqrt(X2 + Y2 + D2);
+	const float Arc = D > 0.0 ? D * atan2(X * Y, D * R) : 0.0;
+	return X * DeepLogPlus(Y, R, X2 + D2) + Y * DeepLogPlus(X, R, Y2 + D2) - Arc;
+}
+
+// U(D) of the rectangle (half extents Half) at the point P (cm, in the rectangle's frame).
+float DeepRectPotential(float2 P, float2 Half, float D)
+{
+	const float X1 = -Half.x - P.x;
+	const float X2 = Half.x - P.x;
+	const float Y1 = -Half.y - P.y;
+	const float Y2 = Half.y - P.y;
+	return DeepCorner(X2, Y2, D) - DeepCorner(X1, Y2, D) - DeepCorner(X2, Y1, D) + DeepCorner(X1, Y1, D);
+}
+
+[numthreads(8, 8, 1)]
+void DeepHeadCS(uint3 GroupId : SV_GroupID, uint3 GroupThread : SV_GroupThreadID)
+{
+	const uint Record = GroupId.z;
+	if (Record >= uint(NumDeep))
+	{
+		return;
+	}
+	const uint4 Box = DeepInfo[Record];   // min column, min row, columns, rows
+	const uint2 Local = GroupId.xy * 8 + GroupThread.xy;
+	if (Local.x >= Box.z || Local.y >= Box.w)
+	{
+		return;
+	}
+	const int2 Cell = int2(Box.xy + Local);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const float4 Place = DeepData[Record * FluidNinjaWaveDeepStride + 0];    // centre x, y, axis cos, sin
+	const float4 Column = DeepData[Record * FluidNinjaWaveDeepStride + 1];   // half extents a, b, top z1, bottom z2
+	const float4 Shape = DeepData[Record * FluidNinjaWaveDeepStride + 2];    // depth h, scale, taper start, taper end
+	// The cell centre in the rectangle's frame: along its first axis and across it.
+	const float2 Offset = CellCentre(Cell) - Place.xy;
+	const float2 P = float2(dot(Offset, Place.zw), dot(Offset, float2(-Place.w, Place.z)));
+	const float Rho2 = dot(P, P);
+	const float Radius = sqrt(Rho2);
+	if (Radius >= Shape.w)
+	{
+		return;
+	}
+	const float Ramp = sin(0.5 * FluidNinjaWavePi * saturate((Shape.w - Radius) / max(Shape.w - Shape.z, 1.0)));
+	const float Taper = Radius <= Shape.z ? 1.0 : Ramp * Ramp;
+	const float2 Half = Column.xy;
+	const float Area = 4.0 * Half.x * Half.y;
+	const float Z1 = Column.z;
+	const float Z2 = Column.w;
+	const float H = Shape.x;
+	float Sum = 0.0;
+	[unroll]
+	for (int N = 0; N < FNB_WAVE_DEEP_IMAGES; ++N)
+	{
+		const float Below = 2.0 * float(N) * H;       // the n-th image pair below the source
+		const float Above = 2.0 * float(N + 1) * H;   // and the n-th above the bed's mirror
+		float Term = 0.0;
+		if (N < FNB_WAVE_DEEP_EXACT_IMAGES)
+		{
+			Term = DeepRectPotential(P, Half, Z1 + Below) - DeepRectPotential(P, Half, Z2 + Below)
+				+ DeepRectPotential(P, Half, Above - Z2) - DeepRectPotential(P, Half, Above - Z1);
+		}
+		else
+		{
+			Term = Area * (rsqrt(Rho2 + (Z1 + Below) * (Z1 + Below)) - rsqrt(Rho2 + (Z2 + Below) * (Z2 + Below))
+				+ rsqrt(Rho2 + (Above - Z2) * (Above - Z2)) - rsqrt(Rho2 + (Above - Z1) * (Above - Z1)));
+		}
+		Sum += ((N & 1) != 0 ? -1.0 : 1.0) * FluidNinjaWaveDeepWeight[N] * Term;
+	}
+	const float Head = Shape.y * Sum * Taper / (2.0 * FluidNinjaWavePi);
+	const int Units = int(round(clamp(Head * DeepFixedScale, -1.0e9, 1.0e9)));
+	if (Units != 0)
+	{
+		InterlockedAdd(DeepOut[uint(Cell.y) * uint(GridSize.x) + uint(Cell.x)], asuint(Units));
+	}
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Assemble the source texture: P, y and the erase flag per cell, then the header row (the origin and contents travel together, whatever
+// the tick order).
+
+[numthreads(8, 8, 1)]
+void AssembleCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (Cell.x >= GridSize.x || Cell.y > GridSize.y)
+	{
+		return;
+	}
+	if (Cell.y == GridSize.y)
+	{
+		SourceOut[Cell] = Cell.x == 0 ? Header0 : (Cell.x == 1 ? Header1 : float4(0.0, 0.0, 0.0, 0.0));
+		return;
+	}
+	const int3 Texel = int3(Cell, 0);
+	float Head = asfloat(HeadIn.Load(Texel));
+	// The sinkers' deep heads add to the floaters' (sources superpose); without a sinker P is the raster's alone, bit for bit.
+	if (HasDeep != 0)
+	{
+		Head += float(asint(DeepIn[uint(Cell.y) * uint(GridSize.x) + uint(Cell.x)])) * DeepToCm;
+	}
+	const float Y = float(asint(ImpulseIn.Load(Texel))) * ImpulseToHead;
+	// A: the pressing hull's speed through the water (cm/s), the core's waterline foam (interface version 4; a pre-4 core ignores it).
+	const float Speed = asfloat(SpeedIn.Load(Texel));
+	float Erase = EraseAll != 0 ? 1.0 : 0.0;
+	for (int K = 0; K < NumErase; ++K)
+	{
+		const int4 Box = EraseBoxes[K];
+		if (all(Cell >= Box.xy) && all(Cell <= Box.zw))
+		{
+			Erase = 1.0;
+		}
+	}
+	SourceOut[Cell] = float4(Head, Y, Erase, Speed);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Self fields, a batch at a time (thread group z is the field's place in the batch, SelfInfo its record).
+//
+// Recentring by whole cells: the state and the pending impulse move with the world (cells newly exposed at the edge are still water
+// with nothing pending). A shift reads its neighbours, so SelfShiftCS copies each moved field out of its slot, shifted, into the shift
+// buffers, and SelfBeginCS copies it back.
+
+[numthreads(8, 8, 1)]
+void SelfShiftCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const int4 Info2 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride + 2];
+	const int2 From = Cell + Info2.yz;
+	const uint Index = SlotBase(Info2.x) + CellIndex(Cell);
+	if (InsideGrid(From))
+	{
+		const uint Source = SlotBase(Info0.x) + CellIndex(From);
+		ShiftStateOut[Index] = StatePoolIn[Source];
+		ShiftImpulseOut[Index] = ImpulsePoolIn[Source];
+	}
+	else
+	{
+		ShiftStateOut[Index] = float2(0.0, 0.0);
+		ShiftImpulseOut[Index] = 0u;
+	}
+}
+
+// Each field's start of the frame, by its flags: a new field is still water with nothing pending and no P; a recentred one takes its
+// moved state and impulse back; one with sources this frame clears P for the raster; a reset one drops what is pending.
+[numthreads(8, 8, 1)]
+void SelfBeginCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const uint Flags = uint(Info0.y);
+	const uint Index = SlotBase(Info0.x) + CellIndex(Cell);
+	if ((Flags & FluidNinjaWaveSelfNew) != 0u)
+	{
+		StatePool[Index] = float2(0.0, 0.0);
+		HeadPool[Index] = 0u;
+		ImpulsePool[Index] = 0u;
+	}
+	if ((Flags & FluidNinjaWaveSelfMoved) != 0u)
+	{
+		const uint Moved = SlotBase(SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride + 2].x) + CellIndex(Cell);
+		StatePool[Index] = ShiftStateIn[Moved];
+		ImpulsePool[Index] = ShiftImpulseIn[Moved];
+	}
+	if ((Flags & FluidNinjaWaveSelfSources) != 0u)
+	{
+		HeadPool[Index] = 0u;
+	}
+	if ((Flags & FluidNinjaWaveSelfReset) != 0u)
+	{
+		ImpulsePool[Index] = 0u;
+	}
+}
+
+// Reset after the raster: η = −P, v = 0, as the core's erase flag does (B_self = 0, and the tile says so at once).
+[numthreads(8, 8, 1)]
+void SelfResetCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const uint Index = SlotBase(Info0.x) + CellIndex(Cell);
+	const float Head = asfloat(HeadPoolIn[Index]);
+	StatePool[Index] = float2(-Head, 0.0);
+	SelfTileOut[Info0.zw + Cell] = 0.0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Self field step: the core's tick, ported line for line from FluidNinja Waves (FluidNinjaBuoyancyDev/Tools/FluidNinjaWaves:
+// Ninja_WavePrepare.hlsl, Ninja_WaveStep.hlsl, _catmullrom.hlsl, and Niagara's Blur2 mip generation of the WaveOp target), with the core's
+// obstacles, depth and current from its Wave Aux target. Per tick: SelfPrepareCS (WaveOp mip 0), SelfMipCS once per mip level, then
+// SelfStepCS; after the frame's ticks, SelfExportCS writes B_self = η + P into the atlas. The differences from the core are only where
+// the self field has no core cells: past its own window edge (an absorbing band, then nothing) and past the simulation's window
+// (SelfAux), and in the window the k = 0 kill's mean is taken over (the field's own N x N; the core's is the simulation's). That kill runs
+// at the field's own rate, fnb.Waves.SelfMeanRelax (0.5 /s by default), not the core's Wave.MeanRelax (30 or 5 /s): the field's absorbing
+// band already dominates its uniform mode, and a strong pin on a small tile turns each impulse into a uniform kick. Two parts of the core's
+// interface version 5 are left out on purpose: the closed-window ⟨v⟩ pin (a self tile is an open window, whose sum of v has real fluxes
+// through its edge) and the in-step clamp of the rates (the plugin clamps the self rate to 0.5 / TickSeconds, the only step this field
+// takes). Any other change to the core's step must be made here too, the weight table included. Interface 2 of the core
+// (User.Wave.InterfaceVersion): the breaking slope is judged on η across source-free cells, and the k = 0 mode is killed (η + P relaxed in
+// the open-edge sponge, the field's mean s relaxed at MeanRelax).
+
+// The dispersion weights of Ninja_WaveStep.hlsl (the P0 minimax table; rows H_j = 1.28 · 1.683891^j cells, Bo = (σ/ρ) / (g Δ²)).
+static const float FluidNinjaWaveWG[12][9] = {
+	{ 2.652007, 0.2231427, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 2.139424, 0.5073167, 0.01866169, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 2.076839, 0.3952435, 0.1602098, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 2.169085, 0.2620277, 0.2055651, 0.04232308, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 2.115532, 0.32208, 0.09967527, 0.1033419, 0.01101243, 0.0, 0.0, 0.0, 0.0 },
+	{ 2.11266, 0.330048, 0.08598847, 0.07846895, 0.03881073, 0.004212264, 0.0, 0.0, 0.0 },
+	{ 2.112846, 0.3295296, 0.08799041, 0.06950843, 0.02918338, 0.02122492, 0.0, 0.0, 0.0 },
+	{ 2.112486, 0.3305339, 0.08411518, 0.07931206, 0.01001729, 0.03198638, 0.0, 0.0, 0.00164963 },
+	{ 2.112476, 0.3305616, 0.08400983, 0.07963947, 0.009197677, 0.02809094, 0.0, 0.006120074, 0.0 },
+	{ 2.112991, 0.3291329, 0.08587961, 0.07864184, 0.00983242, 0.02616774, 0.0, 0.007710436, 0.0 },
+	{ 2.109872, 0.3377785, 0.07471284, 0.08403116, 0.008085577, 0.02663098, 0.0, 0.007667287, 0.0 },
+	{ 2.109872, 0.3377785, 0.07471284, 0.08403116, 0.008085577, 0.02663098, 0.0, 0.007667287, 0.0 } };
+static const float FluidNinjaWaveWC[12][9] = {
+	{ 0.5048955, 18.69172, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 4.901266, 0.0, 0.07636693, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.384365, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.899802, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920234, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920234, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920234, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920235, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920239, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920244, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920241, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 },
+	{ 7.920241, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 } };
+
+// Wave Prepare: the previous (η, v), advected by FluidNinja's current (16-tap Catmull-Rom, outside the field 0; an exact load below
+// 0.01 cell), the body's sources this tick (P, and P_dyn = y/(Ticks·dt)) and the mask: mip 0 = (s·m, m, v·m, η·m), s = η + P + P_dyn.
+// The core's whole-cell scroll has no counterpart here: the self field recentres by whole cells between frames (SelfShiftCS).
+[numthreads(8, 8, 1)]
+void SelfPrepareCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const int4 Info1 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride + 1];
+	const uint Base = SlotBase(Info0.x);
+	const float4 Aux = SelfAux(Cell, Info1.xy, asfloat(Info1.z));
+	const float Wet = Aux.x;
+	const float2 Drift = Aux.zw;
+	float2 State = float2(0.0, 0.0);
+	if (dot(Drift, Drift) <= 1e-4)
+	{
+		State = StatePoolIn[Base + CellIndex(Cell)];
+	}
+	else
+	{
+		const float2 CrPos = float2(Cell) - Drift;
+		const float2 CrBase = floor(CrPos);
+		const float2 CrT = CrPos - CrBase;
+		const float2 CrT2 = CrT * CrT;
+		const float2 CrT3 = CrT2 * CrT;
+		float2 CrW[4];
+		CrW[0] = 0.5 * (-CrT3 + 2.0 * CrT2 - CrT);
+		CrW[1] = 0.5 * (3.0 * CrT3 - 5.0 * CrT2 + 2.0);
+		CrW[2] = 0.5 * (-3.0 * CrT3 + 4.0 * CrT2 + CrT);
+		CrW[3] = 0.5 * (CrT3 - CrT2);
+		const int2 CrI = int2(CrBase);
+		for (int CrJ = 0; CrJ < 4; ++CrJ)
+		{
+			for (int CrK = 0; CrK < 4; ++CrK)
+			{
+				const int2 CrQ = CrI + int2(CrK - 1, CrJ - 1);
+				if (InsideGrid(CrQ))
+				{
+					State += (CrW[CrK].x * CrW[CrJ].y) * StatePoolIn[Base + CellIndex(CrQ)];
+				}
+			}
+		}
+	}
+	const float Eta = State.x;
+	const float V = State.y;
+	const uint Index = Base + CellIndex(Cell);
+	const float S = Eta + asfloat(HeadPoolIn[Index]) + float(asint(ImpulsePoolIn[Index])) * HeadPerUnit;
+	WaveOpOut[uint3(Cell, Id.z)] = float4(S * Wet, Wet, V * Wet, Eta * Wet);
+}
+
+// Niagara's Blur2 mip generation (NiagaraGenerateMips.usf, kernel half-width 2): each texel of mip l is the 5 x 5 Gaussian
+// exp(-(x² + y²)/2), normalised, of bilinear clamped samples of mip l - 1 two of its texels apart. Each slice on its own.
+[numthreads(8, 8, 1)]
+void SelfMipCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (any(int2(Id.xy) >= MipOutSize))
+	{
+		return;
+	}
+	const float2 UV = (float2(Id.xy) + 0.5) / float2(MipOutSize);
+	const float2 SrcTexel = 1.0 / float2(MipInSize);
+	const float Slice = float(Id.z);
+	float4 Sum = 0.0;
+	float Total = 0.0;
+	for (int Y = -2; Y <= 2; ++Y)
+	{
+		for (int X = -2; X <= 2; ++X)
+		{
+			const float W = exp(-float(X * X + Y * Y) / 2.0) / (3.14 * 2.0);
+			Sum += MipIn.SampleLevel(WaveOpSampler, float3(UV + float2(X, Y) * SrcTexel * 2.0, Slice), 0) * W;
+			Total += W;
+		}
+	}
+	MipOut[Id] = Sum / Total;
+}
+
+// Wave Step: v' = (v − dt g L(s) − dt (Damping + sponge) v − dt ν₄ T0(T0(v))) exp(−dt (shore + breaking)) m, η' = (η + dt v') m,
+// η' = (η' + P) exp(−dt sponge) − P − dt MeanRelax ⟨s⟩ (the k = 0 kill: the sponge relaxes the wave over a hull toward 0 at the rate it
+// damps v, and the window's mean s is relaxed everywhere), then the self field's own absorbing band (an exact decay of both near its
+// window's edge). The group's mip-0 texels, with a two-cell apron, are read once into group memory (the field is a whole number of groups
+// across).
+groupshared float4 StepTile[12][12];
+
+[numthreads(8, 8, 1)]
+void SelfStepCS(uint3 Id : SV_DispatchThreadID, uint3 GroupId : SV_GroupID, uint3 GroupThread : SV_GroupThreadID, uint GroupIndex : SV_GroupIndex)
+{
+	const int2 TileOrigin = int2(GroupId.xy) * 8 - 2;
+	for (uint K = GroupIndex; K < 144; K += 64)
+	{
+		const int2 Q = TileOrigin + int2(K % 12, K / 12);
+		StepTile[K / 12][K % 12] = InsideGrid(Q) ? WaveOp.Load(int4(Q, int(Id.z), 0)) : float4(0.0, 0.0, 0.0, 0.0);
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const int4 Info1 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride + 1];
+	const int2 AuxCell = Info1.xy;
+	const float SpongeCm = asfloat(Info1.w);
+	const float Slice = float(Id.z);
+	const int NX = GridSize.x;
+	const int NY = GridSize.y;
+	const float2 Cells = float2(NX, NY);
+
+	// ---- mip 0 (s m, m, v, eta) on the 5 x 5 around the cell; outside the field 0 (dry)
+	float4 M[5][5];
+	for (int Lj = 0; Lj < 5; ++Lj)
+	{
+		for (int Li = 0; Li < 5; ++Li)
+		{
+			M[Lj][Li] = StepTile[GroupThread.y + Lj][GroupThread.x + Li];
+		}
+	}
+	const float4 C = M[2][2];
+	const float Wet = C.y;
+	const float S = C.x;
+	const float VAdv = C.z;
+	const float EtaAdv = C.w;
+	const float BW[3] = {0.25, 0.5, 0.25};
+
+	// ---- level 0: masked binomial, and the biharmonic hyperviscosity T0(T0(v))
+	float Num0 = 0.0;
+	float Den0 = 0.0;
+	float T0v[3][3];
+	for (int Kj = 0; Kj < 3; ++Kj)
+	{
+		for (int Ki = 0; Ki < 3; ++Ki)
+		{
+			const float4 Q = M[Kj + 1][Ki + 1];
+			const float Bk = BW[Ki] * BW[Kj];
+			Num0 += Bk * Q.x;
+			Den0 += Bk * Q.y;
+			float NumV = 0.0;
+			float DenV = 0.0;
+			for (int Qj = 0; Qj < 3; ++Qj)
+			{
+				for (int Qi = 0; Qi < 3; ++Qi)
+				{
+					const float4 R = M[Kj + Qj][Ki + Qi];
+					const float Bq = BW[Qi] * BW[Qj];
+					NumV += Bq * R.y * R.z;
+					DenV += Bq * R.y;
+				}
+			}
+			T0v[Kj][Ki] = DenV > 0.0 ? Q.z - NumV / DenV : 0.0;
+		}
+	}
+	const float T0 = Den0 > 0.0 ? S - Num0 / Den0 : 0.0;
+	float NumH = 0.0;
+	float DenH = 0.0;
+	for (int Hj = 0; Hj < 3; ++Hj)
+	{
+		for (int Hi = 0; Hi < 3; ++Hi)
+		{
+			const float Mk = M[Hj + 1][Hi + 1].y;
+			const float Bk = BW[Hi] * BW[Hj];
+			NumH += Bk * Mk * T0v[Hj][Hi];
+			DenH += Bk * Mk;
+		}
+	}
+	const float HyperV = DenH > 0.0 ? T0v[1][1] - NumH / DenH : 0.0;
+
+	// ---- cell size and depth (the core's, from its Wave Aux)
+	const float Dx = CellCm;
+	const float Depth = max(SelfAux(Cell, AuxCell, asfloat(Info1.z)).y, 1.0);
+
+	// ---- dispersion weights
+	const float RowU = clamp(log(max(Depth / Dx, 1e-6) / 1.28) * 1.91899, 0.0, 11.0);
+	const int Row = min(int(RowU), 10);
+	const float RowA = RowU - float(Row);
+	const float Bo = 72.8 / (981.0 * Dx * Dx);
+
+	float L = lerp(FluidNinjaWaveWG[Row][0] + Bo * FluidNinjaWaveWC[Row][0], FluidNinjaWaveWG[Row + 1][0] + Bo * FluidNinjaWaveWC[Row + 1][0], RowA) * T0;
+	const float2 UV = (float2(Cell) + 0.5) / Cells;
+	for (int Lv = 1; Lv < 9; ++Lv)
+	{
+		const float Wl = lerp(FluidNinjaWaveWG[Row][Lv] + Bo * FluidNinjaWaveWC[Row][Lv], FluidNinjaWaveWG[Row + 1][Lv] + Bo * FluidNinjaWaveWC[Row + 1][Lv], RowA);
+		if (Wl > 0.0)
+		{
+			// A 64 or 128 field has no level 7 or 8 (its chain ends at one texel): those read its last level, S less the window's mean, the
+			// nearest the field has to the core's S less a wider mean (the hardware's LOD clamp did the same silently; Nl is 1 there too).
+			const float Level = float(min(Lv, TopMip));
+			const float2 Nl = float2(max(NX >> Lv, 1), max(NY >> Lv, 1));
+			const float2 Lo = 0.5 / Nl;
+			const float2 Hi = 1.0 - Lo;
+			const float2 Tt = clamp(UV, Lo, Hi) * Nl - 0.5;
+			const float2 I0 = floor(Tt);
+			const float2 F = Tt - I0;
+			const float2 F2 = F * F;
+			const float2 F3 = F2 * F;
+			const float2 B0 = (1.0 - F) * (1.0 - F) * (1.0 - F) / 6.0;
+			const float2 B1 = (4.0 - 6.0 * F2 + 3.0 * F3) / 6.0;
+			const float2 B2 = (1.0 + 3.0 * F + 3.0 * F2 - 3.0 * F3) / 6.0;
+			const float2 B3 = F3 / 6.0;
+			const float2 G0 = B0 + B1;
+			const float2 G1 = B2 + B3;
+			const float2 P0 = clamp((I0 - 1.0 + B1 / G0 + 0.5) / Nl, Lo, Hi);
+			const float2 P1 = clamp((I0 + 1.0 + B3 / G1 + 0.5) / Nl, Lo, Hi);
+			const float4 V00 = WaveOp.SampleLevel(WaveOpSampler, float3(P0.x, P0.y, Slice), Level);
+			const float4 V10 = WaveOp.SampleLevel(WaveOpSampler, float3(P1.x, P0.y, Slice), Level);
+			const float4 V01 = WaveOp.SampleLevel(WaveOpSampler, float3(P0.x, P1.y, Slice), Level);
+			const float4 V11 = WaveOp.SampleLevel(WaveOpSampler, float3(P1.x, P1.y, Slice), Level);
+			const float4 G = G0.x * G0.y * V00 + G1.x * G0.y * V10 + G0.x * G1.y * V01 + G1.x * G1.y * V11;
+			const float Tl = G.y >= 1e-3 ? S - G.x / G.y : 0.0;
+			L += Wl * Tl;
+		}
+	}
+	L /= Dx;
+
+	// ---- damping: Wave.Damping and the core's open-edge sponge (8/s at the border, quadratic, on v here and on η below) or wall absorption
+	// (by the cell's place in the simulation's window); shore and breaking as an exact decay
+	float Gamma = Damping;
+	float SpongeEta = 0.0;
+	if (EdgeOpen != 0 && SimSpongeCm > 0.0)
+	{
+		const int2 SimCell = AuxCell + Cell;
+		const float EdgeCm = min(min(float(SimCell.x) + 0.5, float(SimCells.x - SimCell.x) - 0.5),
+			min(float(SimCell.y) + 0.5, float(SimCells.y - SimCell.y) - 0.5)) * CellCm;
+		const float Sponge = saturate(1.0 - EdgeCm / SimSpongeCm);
+		Gamma += 8.0 * Sponge * Sponge;
+		SpongeEta = 8.0 * Sponge * Sponge;
+	}
+	if (EdgeOpen == 0 && WallAbsorption > 0.0 && WallBandCm > 0.0)
+	{
+		const int2 SimCell = AuxCell + Cell;
+		const float WallCm = min(min(float(SimCell.x) + 0.5, float(SimCells.x - SimCell.x) - 0.5),
+			min(float(SimCell.y) + 0.5, float(SimCells.y - SimCell.y) - 0.5)) * CellCm;
+		Gamma += WallCm < WallBandCm ? WallAbsorption : 0.0;
+	}
+	float Decay = ShoreDepthCm > 0.0 ? 8.0 * saturate(1.0 - Depth / ShoreDepthCm) : 0.0;
+	// Breaking is judged on the wave, η (mip 0 .w = η·m), not on s = η + P + P_dyn (.x): judged on s, a moving hull's static-head edge and
+	// every one-tick impulse spike broke on themselves (the Kelvin wake came out at 0.56 of theory). A cell under a source (s ≠ η: a static
+	// head or this tick's impulse) is left out of the judgement as well: under a hull η is its hollow, so a hull side would read as a steep
+	// wave and damp the water at its own waterline for good. The slope is taken only across pairs of wet, source-free cells (a neighbour
+	// that carries a source counts as dry here).
+	const float4 East = M[2][3];
+	const float4 West = M[2][1];
+	const float4 North = M[3][2];
+	const float4 South = M[1][2];
+	const bool CentreFree = abs(C.x - C.w) <= 1e-3;
+	const bool EastFree = East.y > 0.5 && abs(East.x - East.w) <= 1e-3;
+	const bool WestFree = West.y > 0.5 && abs(West.x - West.w) <= 1e-3;
+	const bool NorthFree = North.y > 0.5 && abs(North.x - North.w) <= 1e-3;
+	const bool SouthFree = South.y > 0.5 && abs(South.x - South.w) <= 1e-3;
+	const float SlopeX = !CentreFree ? 0.0 : ((EastFree && WestFree) ? 0.5 * (East.w - West.w) : (EastFree ? East.w - EtaAdv : (WestFree ? EtaAdv - West.w : 0.0)));
+	const float SlopeY = !CentreFree ? 0.0 : ((NorthFree && SouthFree) ? 0.5 * (North.w - South.w) : (NorthFree ? North.w - EtaAdv : (SouthFree ? EtaAdv - South.w : 0.0)));
+	const float Slope = length(float2(SlopeX, SlopeY)) / Dx;
+	if (BreakingSlope > 0.0 && Slope > BreakingSlope)
+	{
+		Decay += 20.0 * (1.0 - BreakingSlope / Slope);
+	}
+	if (EtaAdv > 0.6 * Depth)
+	{
+		Decay += 20.0;
+	}
+
+	const float Dt = TickSeconds;
+	float VNew = (VAdv - Dt * 981.0 * L - Dt * Gamma * VAdv - Dt * Hyperviscosity * HyperV) * exp(-Dt * Decay) * Wet;
+	float EtaNew = (EtaAdv + Dt * VNew) * Wet;
+
+	// ---- the k = 0 mode: a uniform level is invisible to L and to the damping of v, so under a current the window's mean level crept up.
+	// Two sinks, the core's two that apply to an open window (its interface-5 ⟨v⟩ pin acts on walled windows only, and a self tile is
+	// open). The open-edge sponge relaxes the wave over a hull, η + P (not the hollow itself: a hull parked in the band keeps its draft),
+	// toward 0 at the 8 Sponge² /s it damps v with, as an exact decay. And the window's mean s over wet cells is relaxed at MeanRelax (the
+	// field's own rate, fnb.Waves.SelfMeanRelax) as an explicit term: the mean comes from WaveOp's one-texel level, whose texel averages
+	// (s·m, m, v·m, η·m) over the window, so ⟨s⟩ = .x / .y. The mean of s, not of η: under a hull s is about 0, so the field's own hollow
+	// adds no bias. Here P is the cell's own static head (HeadPool, what SelfPrepareCS put into s) and the window is the field's own N x N.
+	const float SrcP = asfloat(HeadPoolIn[SlotBase(Info0.x) + CellIndex(Cell)]);
+	EtaNew = (EtaNew + SrcP * Wet) * exp(-Dt * SpongeEta) - SrcP * Wet;
+	if (MeanRelax > 0.0)
+	{
+		const float4 Top = WaveOp.Load(int4(0, 0, int(Id.z), min(int(firstbithigh(uint(max(max(NX, NY), 1)))), TopMip)));
+		const float MeanS = Top.y > 1e-6 ? Top.x / Top.y : 0.0;
+		EtaNew -= Dt * MeanRelax * MeanS * Wet;
+	}
+
+	// ---- the self field's own absorbing band, SpongeRate·ramp² over its window's outer SpongeCm
+	const float2 P = CellCentre(Cell);
+	const float Window = float(NX) * CellCm;
+	const float Edge = min(min(P.x, P.y), min(Window - P.x, Window - P.y));
+	const float Across = SpongeCm > 0.0 ? saturate((SpongeCm - Edge) / SpongeCm) : 0.0;
+	const float Keep = exp(-SpongeRate * Across * Across * Dt);
+	StatePool[SlotBase(Info0.x) + CellIndex(Cell)] = float2(EtaNew * Keep, VNew * Keep);
+}
+
+// After the frame's ticks: B_self = η + P into the body's atlas tile, and the impulse the step took is gone.
+[numthreads(8, 8, 1)]
+void SelfExportCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int4 Info0 = SelfInfo[Id.z * FluidNinjaWaveSelfInfoStride];
+	const uint Index = SlotBase(Info0.x) + CellIndex(Cell);
+	SelfTileOut[Info0.zw + Cell] = StatePoolIn[Index].x + asfloat(HeadPoolIn[Index]);
+	ImpulsePool[Index] = 0u;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Probes (test bench): B (cm) of the core's output at grid-relative points, bilinear over the cells inside the grid (0 outside).
+
+[numthreads(64, 1, 1)]
+void ProbeCS(uint3 Id : SV_DispatchThreadID)
+{
+	if (Id.x >= uint(NumProbes))
+	{
+		return;
+	}
+	const float2 T = ProbePoints[Id.x] / CellCm - 0.5;
+	const int2 P0 = int2(floor(T));
+	const float2 F = T - float2(P0);
+	float Sum = 0.0;
+	[unroll]
+	for (int K = 0; K < 4; ++K)
+	{
+		const int2 O = int2(K & 1, K >> 1);
+		const int2 Q = P0 + O;
+		if (InsideGrid(Q))
+		{
+			Sum += PressureTexture.Load(int3(Q, 0)).z * (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y);
+		}
+	}
+	ProbeValues[ProbeSlots[Id.x]] = Sum;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Stats (test bench): per 16 x 16 group of the core's output, (Σ η, Σ η², Σ P, max |η|) with η = B − A, summed on the CPU in double.
+// Threads past the grid count nothing but still take part in the group's sums.
+
+groupshared float4 StatsShared[256];
+
+[numthreads(16, 16, 1)]
+void StatsCS(uint3 Id : SV_DispatchThreadID, uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const int2 Cell = int2(Id.xy);
+	float4 Mine = float4(0.0, 0.0, 0.0, 0.0);
+	if (InsideGrid(Cell))
+	{
+		const float4 Texel = PressureTexture.Load(int3(Cell, 0));
+		const float Eta = Texel.z - Texel.w;
+		Mine = float4(Eta, Eta * Eta, Texel.w, abs(Eta));
+	}
+	StatsShared[GroupIndex] = Mine;
+	GroupMemoryBarrierWithGroupSync();
+	[unroll]
+	for (uint Stride = 128; Stride > 0; Stride /= 2)
+	{
+		if (GroupIndex < Stride)
+		{
+			const float4 A = StatsShared[GroupIndex];
+			const float4 B = StatsShared[GroupIndex + Stride];
+			StatsShared[GroupIndex] = float4(A.xyz + B.xyz, max(A.w, B.w));
+		}
+		GroupMemoryBarrierWithGroupSync();
+	}
+	if (GroupIndex == 0)
+	{
+		const uint GroupsAcross = (uint(GridSize.x) + 15) / 16;
+		StatsPartials[GroupId.y * GroupsAcross + GroupId.x] = StatsShared[0];
+	}
+}

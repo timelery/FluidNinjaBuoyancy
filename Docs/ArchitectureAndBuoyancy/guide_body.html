@@ -1,0 +1,445 @@
+<section id="overview" class="cover">
+<div class="eyebrow">Modified FluidNinja core and buoyancy plugin guide</div>
+<h1>FluidNinja architecture and buoyancy</h1>
+<p class="lead">How the modified core turns visible water into a surface that floating objects can feel, disturb, and share.</p>
+<p>This guide explains the modified FluidNinja LIVE core and the reusable FluidNinja Buoyancy plugin. It connects the implementation to the physics, then walks through building a beach ball, a log, a boat, and a wrecking ball in your own Unreal project. You should finish knowing which settings control weight, floating depth, stability, current, waves, and visual effects.</p>
+<div class="cards"><div class="card"><span class="pill">Core enhancements</span><h3>Water reacts to objects</h3><p>Relative tracking, propagating surface waves, independent foam, and optional sharper rendered crests.</p></div><div class="card"><span class="pill">Buoyancy extension</span><h3>Objects react to water</h3><p>Collision-derived hulls, asynchronous surface sampling, Chaos forces, two-way wave coupling, presets, and diagnostics.</p></div></div>
+<div class="callout"><b>The central idea</b><br>The renderer draws water on the GPU. The plugin reads small patches of that water for each body, computes forces in Chaos, and sends the bodies' displacement and impacts back to the modified GPU core.</div>
+<h3>How to read this guide</h3>
+<p>Start with Architecture and The physics for the explanation. Use First floating object and the four object recipes to implement it. Keep the property reference open while tuning. The HTML includes a calculator and searchable properties; the PDF includes the same explanations and worked examples.</p>
+<p class="meta">Source audit: 18 October 2026 · FluidNinja Buoyancy 1.0.1 source · Unreal Engine 5.8</p>
+<div class="callout note"><b>Evidence boundary</b><br>This guide describes the inspected C++, HLSL, plugin configuration, and authoring scripts. It does not certify a particular project's runtime behavior. Check saved Blueprint values, the installed core version, and runtime performance in your project. The worked example results are calculations under stated assumptions.</div>
+</section>
+<!-- More chapters are appended by the guide source below. -->
+
+<section id="architecture">
+<div class="eyebrow">01 · Ownership and technology</div>
+<h2>The architecture</h2>
+<p>FluidNinja owns the GPU flow simulation and water rendering. The core patches extend its Niagara and material assets. The reusable C++ plugin connects that water to Chaos rigid bodies. Your game can consume the plugin's water queries, events, and propulsion controls for its own movement or vehicle systems.</p>
+<figure>
+<svg viewBox="0 0 820 480" role="img" aria-label="Architecture showing FluidNinja, the modified core, reusable buoyancy, and optional game consumers">
+<defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#207a95"/></marker></defs>
+<rect x="5" y="5" width="810" height="160" rx="14" fill="#e7f3f2"/><text class="big" x="25" y="34">GPU · FluidNinja LIVE and the core patches</text>
+<rect class="box" x="25" y="55" width="236" height="88" rx="8"/><text class="big" x="40" y="82">Original flow simulation</text><text class="label" x="40" y="107">Velocity · density · pressure</text><text class="small" x="40" y="128">Obstacles · height field · brushes</text>
+<rect class="box" x="294" y="55" width="232" height="88" rx="8"/><text class="big" x="310" y="82">Custom core additions</text><text class="label" x="310" y="107">Relative tracking · waves</text><text class="small" x="310" y="128">Foam · material displacement</text>
+<rect class="box" x="560" y="55" width="232" height="88" rx="8"/><text class="big" x="576" y="82">Visible water</text><text class="label" x="576" y="107">Surface material and meshes</text><text class="small" x="576" y="128">Original surface + wave response</text><path class="arrow" d="M261 100 H290"/><path class="arrow" d="M526 100 H556"/>
+<rect x="5" y="190" width="810" height="155" rx="14" fill="#edf2fa"/><text class="big" x="25" y="219">FluidNinja Buoyancy · reusable C++ plugin</text>
+<rect class="box" x="25" y="241" width="236" height="81" rx="8"/><text class="big" x="40" y="268">Read the water</text><text class="label" x="40" y="291">Surface Mirror → GPU gather</text><text class="small" x="40" y="312">Asynchronous per-body patches</text>
+<rect class="box" x="294" y="241" width="232" height="81" rx="8"/><text class="big" x="310" y="268">Move the body</text><text class="label" x="310" y="291">Hull integration → Chaos</text><text class="small" x="310" y="312">Lift · drag · torque · impacts</text>
+<rect class="box" x="560" y="241" width="232" height="81" rx="8"/><text class="big" x="576" y="268">Push water back</text><text class="label" x="576" y="291">Head · impulse · own fields</text><text class="small" x="576" y="312">Tracking or point wakes · effects</text><path class="arrow" d="M261 279 H290"/><path class="arrow" d="M526 279 H556"/>
+<path class="arrow" d="M677 143 V178 H13 V279 H21"/><path class="arrow" d="M678 241 V178 H410 V147"/>
+<rect x="5" y="370" width="810" height="102" rx="14" fill="#fff3de"/><text class="big" x="25" y="399">Your game · optional gameplay consumers</text><text class="label" x="25" y="425">Use water queries, contact events, swimmer registration, throttle and rudder</text><text class="label" x="25" y="451">Build your own controls, seats, payload rules, movement and network authority</text><path class="arrow" d="M410 370 V349"/>
+</svg>
+<figcaption>Ownership diagram. The two upward/downward connections form a delayed water–body feedback loop. The flow simulation and the new wave field are separate systems.</figcaption></figure>
+<table><thead><tr><th>Layer</th><th>Where it lives</th><th>Responsibility</th></tr></thead><tbody>
+<tr><td>FluidNinja LIVE</td><td><code>/Game/FluidNinjaLive</code></td><td>Niagara fluid grid, flow buffers, masks, inputs, surface rendering.</td></tr>
+<tr><td>Custom core</td><td>Modified NinjaLiveCore, painter assets, Waves modules, SURFACE function</td><td>Relative tracking; wave, foam, and rendering extensions. Maintained HLSL/tooling lives in the buoyancy plugin.</td></tr>
+<tr><td>Shared plugin</td><td><code>Plugins/FluidNinjaBuoyancy</code></td><td>Water readback, hull physics, self fields, queries, effects, presets, editor validation and developer tests.</td></tr>
+<tr><td>Your game</td><td>Your own Blueprint or C++ classes</td><td>Optional consumers of the public APIs. Boarding, payload management, custom movement and network authority are gameplay responsibilities, not automatic buoyancy features.</td></tr></tbody></table>
+<p><b>Technology in plain language.</b> Niagara runs parallel simulation stages on the GPU. HLSL supplies their math and compute shaders. Render targets hold grids of numbers. Unreal's render graph and asynchronous GPU readback move selected results to C++. Chaos integrates forces into rigid-body motion. Blueprints expose the authored objects and gameplay controls. <a class="ref" href="#S4">[S4]</a> <a class="ref" href="#S7">[S7]</a> <a class="ref" href="#S1">[S1]</a></p>
+<p>The runtime connects FluidNinja to Chaos directly. It does not require the FluidFlux solver or Unreal Water's buoyancy component.</p>
+</section>
+
+<section id="core">
+<div class="eyebrow">02 · Core changes</div>
+<h2>The FluidNinja core enhancements</h2>
+<p>The vendor manual for LIVE 2.0 describes buoyancy as unsupported and identifies loss of point identity in its proposed GPU-to-CPU sampling path. The buoyancy plugin keeps per-body patches and identity under its own control. The core modifications add the feedback needed for objects to disturb water without uncontrolled current amplification. <a class="ref" href="#external">[Vendor manual]</a></p>
+<table><thead><tr><th>Enhancement</th><th>Change</th><th>What users gain</th></tr></thead><tbody>
+<tr><td>Relative tracking</td><td>PainterSourceData and Ninja_Painter take tracked horizontal motion relative to the sampled water when enabled.</td><td>A floater moving with the current does not continually paint that same world velocity back into it.</td></tr>
+<tr><td>Wave field</td><td>NinjaLiveCore gains a height/vertical-speed grid, source texture input, four stages, and versioned outputs.</td><td>Entry rings, displacement wakes, reflections, and waves that rock other bodies.</td></tr>
+<tr><td>Surface material</td><td>The SURFACE function adds wave height to world-position offset and slopes to normals.</td><td>The new waves are visible on existing compatible FluidNinja surfaces.</td></tr>
+<tr><td>Independent wave resolution</td><td>Interface 3 can run the wave grid at 1, 1/2, or 1/4 of pressure-grid width.</td><td>Quality and cost control without resizing the original pressure output.</td></tr>
+<tr><td>Independent foam</td><td>Interface 4 carries a separate advected, decaying foam field.</td><td>Whitecaps, hull trails, and impact foam without injecting flow density to obtain whiteness.</td></tr>
+<tr><td>Optional choppiness</td><td>Material-only horizontal crest sharpening, behind WaveChoppy.</td><td>Sharper-looking crests. It does not add lift or a new physical force.</td></tr></tbody></table>
+<h3>Why relative motion matters</h3>
+<figure><svg viewBox="0 0 820 190" role="img" aria-label="A floating body moving with current has zero relative speed">
+<rect class="box" x="5" y="10" width="395" height="160" rx="10"/><rect class="box" x="420" y="10" width="395" height="160" rx="10"/>
+<text class="big" x="25" y="41">Carried by the river</text><text class="label" x="25" y="72">Body 200 cm/s →</text><text class="label" x="25" y="100">Water 200 cm/s →</text><text class="big" x="25" y="139">Relative motion = 0</text>
+<text class="big" x="440" y="41">Pushed ahead by a motor</text><text class="label" x="440" y="72">Body 300 cm/s →</text><text class="label" x="440" y="100">Water 200 cm/s →</text><text class="big" x="440" y="139">Relative motion = 100 cm/s →</text>
+</svg><figcaption>Conceptual velocities. The actual core conversion also accounts for simulation substeps and coordinate mapping.</figcaption></figure>
+<p>The patch adds <code>User.TrackVelocityRelativeToWater</code>. It subtracts the previous fluid velocity from the tracked horizontal motion, with a gate fading from 2 to 10 cm/s, and handles multiple Niagara ticks in one frame. It preserves vertical puncture motion and bypasses screen-position/camera-facing cases. This is a brush interaction model, not a resolved hull boundary in a 3D fluid solver. <a class="ref" href="#S10">[S10]</a></p>
+<p><b>Velocity subtraction alone is insufficient.</b> Tracking must also suppress tracked density using <code>SelectivelyKillBrushDensityKeepVelocity</code> = 1, 4, or 5. Otherwise density can strengthen the river driver. Value 5 also suppresses density from data-channel points. The plugin checks safe settings across NinjaLives, then checks the local interaction volume and object-type/tag selection before handing a body over.</p>
+<div class="callout note"><b>Choose the interaction route deliberately</b><br>The FluidNinja Buoyancy component defaults to <b>FluidNinjaTracking</b>, which requires the compatible core and safe tracking settings above. <b>Wakes</b> selects the plugin's point-input route. Applying a preset preserves Interaction unless its Set Interaction flag is enabled. The separate Waves switch controls participation in the physical wave field. <a class="ref" href="#S1">[S1]</a> <a class="ref" href="#S12">[S12]</a></div>
+</section>
+
+<section id="sampling">
+<div class="eyebrow">03 · Reading water</div>
+<h2>From a rendered surface to a physics force</h2>
+<p>The plugin's <b>Surface Mirror</b> is a top-down depth capture restricted to water primitives under relevant body footprints. It follows the actual displaced FluidNinja surface. During this capture, the added wave-height term is disabled and restored, so the capture records the original surface <b>W</b>. The new waves are sampled separately to allow each body's own contribution to be removed.</p>
+<figure><svg viewBox="0 0 820 238" role="img" aria-label="Sampling sequence from rendered surface through GPU readback to Chaos">
+<g><rect class="box" x="5" y="20" width="180" height="95" rx="9"/><text class="big" x="20" y="50">1 Capture</text><text class="label" x="20" y="76">Original surface W</text><text class="small" x="20" y="99">Tagged water only</text></g>
+<g><rect class="box" x="213" y="20" width="180" height="95" rx="9"/><text class="big" x="228" y="50">2 Gather</text><text class="label" x="228" y="76">Per-body grids</text><text class="small" x="228" y="99">Height · flow · waves</text></g>
+<g><rect class="box" x="421" y="20" width="180" height="95" rx="9"/><text class="big" x="436" y="50">3 Read back</text><text class="label" x="436" y="76">Completed GPU data</text><text class="small" x="436" y="99">Age tracked per patch</text></g>
+<g><rect class="box" x="629" y="20" width="185" height="95" rx="9"/><text class="big" x="644" y="50">4 Integrate</text><text class="label" x="644" y="76">Current Chaos pose</text><text class="small" x="644" y="99">Force and torque</text></g>
+<path class="arrow" d="M185 67 H208"/><path class="arrow" d="M393 67 H416"/><path class="arrow" d="M601 67 H624"/>
+<rect x="5" y="140" width="810" height="79" rx="9" fill="#fff3de"/><text class="big" x="23" y="169">Three clocks, one coupled system</text><text class="label" x="23" y="197">FluidNinja simulation tick · your Chaos time step · render frame rate</text>
+</svg><figcaption>A readback is delayed data, even when polled as early as possible. The implementation exposes its age rather than assuming an exact three-frame delay.</figcaption></figure>
+<p>Surface actors are discovered by tags. The plugin's default Surface Tags are <code>SplineSource</code>, <code>SeaSurface</code>, and <code>FluidNinjaBuoyancySurface</code>. Add the last tag to your pool or lake surface actor, or configure your own tag. These are <b>water surface actor tags</b>, distinct from the primitive tags used by tracking. Steep waterfall faces are rejected because a top-down height capture cannot represent them as ordinary supporting water. <a class="ref" href="#S23">[S23]</a></p>
+<p>GPU gather resamples water onto each body's grid. Compatible sources can be grouped, with limits on grid size, bodies, and update schedules. Completed asynchronous readbacks become immutable water patches for physics. Height-rate extrapolation is capped by <code>MaxExtrapolationSeconds</code> (0.08 s by default). It reduces apparent lag; it does not make the coupling instantaneous. <a class="ref" href="#S4">[S4]</a> <a class="ref" href="#S15">[S15]</a></p>
+<h3>Converting FluidNinja flow into physical units</h3>
+<div class="math">current [cm/s] = buffer velocity × SimSpeed × cell size [cm] × simulation ticks/s × FlowScaleMultiplier</div>
+<p>The fixed Niagara tick takes priority over render FPS. For example, at 30 rendered frames/s a core configured for 60 Hz can take two simulation ticks each frame; halving the flow conversion because the display runs at 30 FPS would be wrong. The plugin's default Flow Scale Multiplier is <b>1</b>. Verify the actual simulation tick and cell size before calibrating current against measured motion. <a class="ref" href="#S4">[S4]</a> <a class="ref" href="#S5">[S5]</a></p>
+<h3>Units to keep straight</h3>
+<table><thead><tr><th>Quantity</th><th>Authoring unit</th><th>Useful conversion</th></tr></thead><tbody>
+<tr><td>Position, draft, radius</td><td>cm</td><td>100 cm = 1 m</td></tr><tr><td>Volume</td><td>Hull cm³ internally; readout litres</td><td>1,000,000 cm³ = 1 m³ = 1,000 L</td></tr><tr><td>Mass and density</td><td>kg and kg/m³</td><td>Fresh water: 1 L displaced supports 1 kg</td></tr><tr><td>Force and impulse</td><td>Thrust in N; PokeAt in N·s</td><td>1 N = 100 kg·cm/s². Lower-level AddWaterImpulse uses kg·cm/s: 100 of those units = 1 N·s.</td></tr><tr><td>Torque and power</td><td>N·m and W when explained here</td><td>Torque = force × arm; power = force × speed</td></tr></tbody></table>
+</section>
+
+<section id="waves">
+<div class="eyebrow">04 · The custom wave model</div>
+<h2>How objects make waves and feel other waves</h2>
+<p>A body contributes <b>static head P</b>: the water-depth equivalent of its hull pressing into the surface. Motion of that footprint makes displacement wakes. Entry, drag, and slam contribute transient impulses. The core advances a free surface height <b>η</b> and vertical velocity <b>v</b> alongside FluidNinja's existing flow.</p>
+<div class="math">v<sub>next</sub> ≈ v − Δt g L(η + P + P<sub>dynamic</sub>) − Δt Γv<br>η<sub>next</sub> = η + Δt v<sub>next</sub><br>ω² = (gk + (σ/ρ)k³) tanh(kd)</div>
+<p><b>Reading the equations.</b> Gravity restores displaced water; <b>L</b> spreads that restoring influence across wavelengths; <b>Γ</b> represents damping. Wavenumber <b>k = 2π/λ</b> comes from wavelength λ; angular frequency <b>ω = 2πf</b>; <b>d</b> is depth; σ is surface tension. Longer waves and shorter ripples travel differently. In shallow water, long-wave speed approaches √(gd).</p>
+<p>The implementation approximates this gravity–capillary dispersion relation with weighted samples from a mip hierarchy. It uses a symplectic Euler update and additional decay, shoreline, edge, and mean-level terms. It is <b>not an FFT ocean</b> and is not a 3D particle or volume fluid. The model is linear surface-wave physics with practical nonlinear damping and source limits. <a class="ref" href="#S7">[S7]</a></p>
+<table><thead><tr><th>Core step</th><th>What it does</th></tr></thead><tbody>
+<tr><td>Ninja_WaveParams</td><td>Emitter update sizes grids and targets, maps the scrolling simulation, and supplies parameters.</td></tr><tr><td>Wave Prepare</td><td>After vendor Pressure: carries prior waves with current and builds masked operator data.</td></tr><tr><td>Wave Step</td><td>Advances height/speed; applies depth, damping, breaking, and foam sources.</td></tr><tr><td>Wave Aux</td><td>Exports mask, depth, drift, and foam for the plugin.</td></tr><tr><td>Wave Export</td><td>After vendor pressure export: preserves pressure/divergence and writes wave/head channels.</td></tr></tbody></table>
+<h3>The buffer contract</h3>
+<table><thead><tr><th>Data</th><th>Channels</th></tr></thead><tbody>
+<tr><td>Wave source texture</td><td>RGBA32F, width × (height+1). R = static head P in cm; G = impulse head integral in cm·s; B = erase flag; A = pressing hull speed through water in cm/s. Extra header row stores mapping/serial.</td></tr>
+<tr><td>PressureDivergenceBuffer with waves</td><td>RGBA16F. R/G retain original pressure/divergence. B = η + P, the drawn wave height. A = P.</td></tr>
+<tr><td>Wave auxiliary target</td><td>Wet mask, depth, and drift allow the plugin's own fields to use the same environment.</td></tr>
+<tr><td>WaveFoamBuffer</td><td>Separate R16F foam F from 0 to 1. It does not feed density, flow, or buoyancy.</td></tr></tbody></table>
+<p>At equilibrium under a stationary hull, η tends toward −P, so the drawn term <b>B = η + P</b> tends toward zero instead of leaving a permanent visual hole. Moving that pressure footprint creates traveling waves. Impulse sources are spread spatially, constrained by the forces actually transmitted, and scaled by <code>WaveImpulseScale</code>, currently <b>0.35</b>. This is calibrated coupling, not an exact water-entry energy budget. <a class="ref" href="#S5">[S5]</a> <a class="ref" href="#S8">[S8]</a> <a class="ref" href="#S16">[S16]</a></p>
+</section>
+
+<section id="selfwaves">
+<div class="eyebrow">05 · Feedback stability</div>
+<h2>Why a body does not ride its own delayed wave</h2>
+<p>If a body presses water down, then feels that response several frames later as a new disturbance, it can feed energy back into its own motion. Each participating body therefore has a local <b>own-wave field</b>: a copy of the wave model driven only by its own sources.</p>
+<figure><svg viewBox="0 0 820 250" role="img" aria-label="Body feels original water plus all waves minus its own wave field">
+<rect class="box" x="5" y="20" width="230" height="100" rx="9"/><text class="big" x="20" y="52">All waves B</text><text class="label" x="20" y="80">This body + other bodies</text><text class="small" x="20" y="103">Shared core simulation</text>
+<text x="255" y="79" font-size="38">−</text><rect class="box" x="300" y="20" width="225" height="100" rx="9"/><text class="big" x="315" y="52">Own field B_self</text><text class="label" x="315" y="80">This body's sources only</text><text class="small" x="315" y="103">Same mask, depth and drift</text>
+<text x="545" y="79" font-size="38">=</text><rect x="590" y="20" width="225" height="100" fill="#dcefeb" stroke="#8ebdb7" rx="9"/><text class="big" x="605" y="52">Other-body waves</text><text class="label" x="605" y="80">Safe input to buoyancy</text><text class="small" x="605" y="103">Added to original surface W</text>
+<rect x="5" y="150" width="810" height="76" rx="9" fill="#edf3fa"/><text class="big" x="25" y="181">The body's wave resistance is restored in physics</text><text class="label" x="25" y="209">Radiation damping and added mass act during the current Chaos step.</text>
+</svg><figcaption>Self subtraction removes delayed self-feedback. It does not remove waves generated by other bodies.</figcaption></figure>
+<div class="math">water height felt by a body = W + κ (B − B<sub>self</sub>)<br>κ = project Wave Feel Scale × body Wave Feel Scale</div>
+<p><b>Radiation damping</b> represents energy carried away by the body's own waves. <b>Added mass</b> represents water accelerated along with the body. Both affect heave, roll, and pitch. The current source estimates motion frequency and uses frequency-dependent damping, with a natural-frequency fallback. Added mass works through Stable Steps. The rest-damping boost is <b>1</b> in the inspected implementation. <a class="ref" href="#S3">[S3]</a> <a class="ref" href="#S6">[S6]</a></p>
+<div class="callout note"><b>A quality tradeoff that affects behavior</b><br>A body without a usable own field can still make waves, but does not feel the added wave field. It continues to float on original FluidNinja water. Distance, tile fit, and capacity can cause this fallback. Check it when a distant float looks less responsive.</div>
+<h3>Foam and choppiness</h3>
+<p>Interface 4 generates foam from breaking, moving waterline shear, and impacts. Current carries it; exponential decay fades it. With <code>FoamDecay = 0.7</code>, the e-folding time is about 1.43 s: roughly 37% remains after that time, so it is not literally gone in 1.5 seconds. Foam changes appearance only. Separate Niagara whitewater emitters do not automatically consume this foam texture.</p>
+<p><code>WaveChoppy</code> is an optional material static switch, off by default. Its horizontal displacement sharpens crests visually. The physical queries remain based on the height-field model; treat choppiness as an appearance control.</p>
+</section>
+
+<section id="physics">
+<div class="eyebrow">06 · Forces and balance</div>
+<h2>The physics that makes an object float</h2>
+<p>In calm water, a floating body displaces its own mass of water. Shape determines where that water is displaced; mass determines how much is needed. The center of buoyancy is the center of the submerged volume. Forces away from the center of mass produce torque, so a boat can pitch, roll, or right itself.</p>
+<div class="math">F<sub>buoyancy</sub> = ρ<sub>water</sub> g V<sub>submerged</sub><br>At rest: V<sub>submerged</sub> = mass / ρ<sub>water</sub><br>Torque = (force point − center of mass) × force</div>
+<p>Keep <code>BuoyancyMultiplier = 1</code> for this physical relationship. If mass exceeds water density times the full supported volume, the object sinks. A hollow boat can float even though its construction material is denser than water: its sealed outer envelope displaces water while its total mass is much smaller than a solid block of the same size. Flooding and water entering the interior are not simulated. <a class="ref" href="#S2">[S2]</a> <a class="ref" href="#external">[Archimedes]</a></p>
+<figure><svg viewBox="0 0 820 280" role="img" aria-label="Boat cross section showing weight down at center of mass and buoyancy up at displaced volume">
+<path d="M5 140 H815 V270 H5 Z" fill="#dff1f6"/><path d="M5 140 H815" stroke="#409ebc" stroke-width="3"/>
+<path d="M240 90 L580 90 L540 210 L280 210 Z" fill="#e0bc8d" stroke="#83613b" stroke-width="3"/>
+<path d="M258 140 L562 140 L540 210 L280 210 Z" fill="#84c4d4" opacity=".65"/>
+<circle cx="410" cy="130" r="6" fill="#c25a45"/><path d="M410 130 V225" stroke="#c25a45" stroke-width="4"/><path d="M402 214 L410 230 L418 214" fill="#c25a45"/>
+<circle cx="438" cy="174" r="6" fill="#087d86"/><path d="M438 174 V60" stroke="#087d86" stroke-width="4"/><path d="M430 71 L438 55 L446 71" fill="#087d86"/>
+<text class="big" x="30" y="104">Waterline</text><text class="label" x="31" y="178">Submerged volume</text><path d="M182 173 H275" stroke="#207a95"/>
+<text class="big" x="603" y="75">Buoyancy ↑</text><text class="label" x="603" y="101">Through submerged</text><text class="label" x="603" y="123">volume center</text><text class="big" x="603" y="199">Weight ↓</text><text class="label" x="603" y="226">Through center of mass</text>
+</svg><figcaption>Schematic force points are offset for clarity. At a stable, level equilibrium their vertical lines of action align; a disturbance produces restoring or overturning torque.</figcaption></figure>
+<h3>Three hull representations</h3>
+<table><thead><tr><th>Hull model</th><th>Calculation</th><th>Use it for</th></tr></thead><tbody>
+<tr><td>Triangles</td><td>Subdivides simple collision, clips faces at the waterline, integrates hydrostatic pressure, drag, and slam over wet faces.</td><td>Boats and shaped hulls; logs when surface fidelity matters.</td></tr>
+<tr><td>Voxels</td><td>Fills collision with cubes and integrates their wet portions.</td><td>Crates, blocks, and approximate debris. Voxel Count trades detail for cost.</td></tr>
+<tr><td>Spheres</td><td>Uses exact submerged spherical caps for pontoons; projected/wetted geometry for resistance.</td><td>Balls and simple support points. Sphere rows/rings are approximations, not unioned solids.</td></tr></tbody></table>
+<p>The physics hull comes from <b>simple collision</b>, not the beautiful render mesh. Avoid overlapping collision pieces: they can double-count volume, lift, and drag. A closed boat envelope should contain the volume it keeps dry. A thin shell that only follows wood thickness will displace too little; several overlapping boxes can displace too much.</p>
+<h3>Drag and impact</h3>
+<p>Body-point velocity includes translation and rotation: <b>v<sub>point</sub> = v<sub>COM</sub> + ω × r</b>. Subtract local water velocity to get motion through water. The plugin uses pressure and suction terms with linear and quadratic speed coefficients, angle falloff, ITTC skin friction, and slam on growing wet area. These coefficients are tuning controls for the implemented face model; they are not a single universal drag coefficient copied from a textbook. The familiar physical scale is <b>½ρ C<sub>D</sub> A v²</b>. <a class="ref" href="#S2">[S2]</a> <a class="ref" href="#external">[Drag equation]</a></p>
+<p>A heavier object does not automatically fall faster. Ignoring air resistance, entry speed from height H is <b>√(2gH)</b>. It does carry more momentum <b>mv</b> and energy <b>½mv²</b>. Slam, entry power, visible splash, and traveling wave amplitude are related but separately modeled.</p>
+</section>
+
+<section id="stability">
+<div class="eyebrow">07 · Stable behavior</div>
+<h2>Mass, draft, and stability are different controls</h2>
+<table><thead><tr><th>Control</th><th>Meaning</th><th>Choose it when</th></tr></thead><tbody>
+<tr><td>Body Mass</td><td>Uses the primitive's kg. Solves the floating depth from that mass.</td><td>You know the actual object's weight or want it to sink realistically.</td></tr>
+<tr><td>Rest Draft</td><td>At setup, sets mass equal to displaced water at this depth and Rest Attitude.</td><td>You are authoring a desired waterline. The primitive's previous mass is replaced.</td></tr>
+<tr><td>Preset Density</td><td>Editor preset computes mass from collision volume × density, then uses Body Mass.</td><td>You want similarly modeled objects of one material to scale in weight.</td></tr>
+<tr><td>Center Of Mass Offset</td><td>Moves the mass center and changes restoring moments.</td><td>The waterline is correct but the object rolls or tips unrealistically.</td></tr>
+<tr><td>Inertia Scale</td><td>Changes resistance to angular acceleration.</td><td>The mass distribution of a hollow body differs from its collision solid.</td></tr></tbody></table>
+<p><b>Do not repair bad geometry with lift gain.</b> First check units, scale, collision volume, mass mode, and draft. Then adjust center of mass and the collision envelope. Drag controls how motion settles; it should not be the main way to conceal a statically unstable boat.</p>
+<h3>The small-angle stability test</h3>
+<div class="math">GM = KB + I<sub>waterplane</sub> / V<sub>submerged</sub> − KG</div>
+<p>GM is metacentric height: a small-angle measure of whether a tilted body tends to return upright. KB is height of the buoyancy center above the hull bottom; KG is height of the mass center; I is the waterplane's second moment of area about the roll or pitch axis. Positive GM suggests restoring torque near that attitude; negative GM suggests tipping. It does not predict every large-angle capsize or collision. <code>Analyze Hull</code> reports roll and pitch stability for the modeled hull. <a class="ref" href="#S2">[S2]</a></p>
+<h3>Why light bodies need Stable Steps</h3>
+<p>A light ball can gain a large amount of buoyant force after a tiny vertical movement. Its effective water spring is stiff compared with its mass. An explicit force step that is too long can overshoot and add energy. The plugin's <code>Stable Steps</code> handles the unresolved part of stiffness and drag implicitly and includes added mass, rather than demanding one global frame rate for every object.</p>
+<div class="math">For intuition: stiffness K ≈ ρgA<sub>waterplane</sub><br>Natural period T ≈ 2π √((m + added mass) / K)</div>
+<p>Small mass and large waterplane area give a short period. A physics step must resolve that period. Leave Stable Steps on for ordinary use; compare <code>fnb.Buoyancy.Implicit 0</code> and <code>1</code> only as a diagnostic, then restore <code>-1</code> to use project policy. Test the intended frame rate and physics settings in your project; a particular asynchronous physics rate is not a universal prerequisite. <a class="ref" href="#S3">[S3]</a> <a class="ref" href="#S5">[S5]</a></p>
+<div class="callout"><b>Tune in this order</b><br>Collision and scale → physical mass or intended draft → balance and inertia → drag and current → wave coupling → splash, foam, and sound. Recheck after changing hull resolution because the discrete force and splash samples change.</div>
+</section>
+
+<section id="setup">
+<div class="eyebrow">08 · Implementation</div>
+<h2>Create the first floating object</h2>
+<p>Use a small calm test area before adding a river, waves, or character interactions. These steps describe the current editor workflow; they do not modify your project automatically.</p>
+<ol>
+<li><b>Validate the water setup.</b> Enable the compiled FluidNinja Buoyancy plugin and the matching modified FluidNinja core. Run <b>Tools → FluidNinja Buoyancy: Check Setup</b> or <code>fnb.CheckSetup</code>. Read each finding, especially surface discovery, core interface, buffers, and interaction policy.</li>
+<li><b>Configure shared settings.</b> Open <b>Project Settings → Game → FluidNinja Buoyancy</b>. Start with the plugin defaults, including fresh-water density 1000 kg/m³, Flow Scale Multiplier 1, and Stable Steps on.</li>
+<li><b>Identify the water surface.</b> Tag its actor using a configured Surface Tag. Confirm the material uses the right FluidNinja velocity/pressure buffers and simulation mapping. A mesh merely looking blue is not enough.</li>
+<li><b>Prepare a body.</b> Create an Actor Blueprint with a movable Static Mesh Component as root. Give it suitable simple collision, enable physics/collision, and use CCD for small fast drop objects. Prefer a mesh authored at its intended dimensions with unit component scale for the first test.</li>
+<li><b>Add one buoyancy component.</b> Add <b>FluidNinja Buoyancy</b> to the actor. If the floating primitive is not root, set <code>PrimitiveName</code> to its exact component name. Use one buoyancy component per simulated body.</li>
+<li><b>Apply a recipe.</b> Use a preset through the component's Preset panel, or right-click the placed actor → FluidNinja Buoyancy → Apply Preset. Enable Show Plugin Content to find <code>/FluidNinjaBuoyancy/Presets</code>. The actor-level tool can add a buoyancy component when one is missing.</li>
+<li><b>Set mass and starting behavior.</b> Use Body Mass for measured kg or density presets, Rest Draft for a chosen waterline. Leave Settle On Start on for an already floating object; turn it off for a drop. Keep Buoyancy Multiplier and Flow Coupling at 1 for the initial physical baseline.</li>
+<li><b>Analyze and test.</b> Click Analyze Hull. Read volume, mass, draft, and GM. In Play use <code>fnb.Buoyancy 2</code> and Get Readout. Check that a settled fresh-water floater displaces about one litre per kilogram, then test a gentle push and a small drop.</li>
+<li><b>Add feedback and presentation.</b> Confirm Waves is enabled for the body and simulation. Choose Wakes or safe tracking deliberately. Add the wetness material function and configure splash/sounds only after the body behaves correctly.</li>
+</ol>
+<div class="callout note"><b>Apply hull presets before Play</b><br>Preset application writes properties and mass. It does not promise to rebuild an already initialized runtime hull. Make structural changes in the editor and restart Play. Use <b>Apply Buoyancy Preset To Component</b> when you need to target a particular existing component. <a class="ref" href="#S12">[S12]</a></div>
+<p>When gameplay teleports a floating actor, call <code>MarkTeleported()</code> after moving it. This lets the wave system erase the old footprint and reset the own field instead of treating the move as a violent water displacement.</p>
+</section>
+
+<section id="recipes">
+<div class="eyebrow">09 · Four worked objects</div>
+<h2>Choose values from size and mass</h2>
+<p>These are calculated reference objects, not universal material prescriptions or newly tested prefabs. Assume fresh water at <b>1,000 kg/m³</b>, unit component scale, accurate simple collision, Buoyancy Multiplier 1, and calm water without contacts. Force examples use <b>g = 9.8 m/s²</b>, consistent with a common Unreal world gravity; the wave core uses about 981 cm/s². Use the target world's actual gravity when comparing force.</p>
+<figure><svg viewBox="0 0 820 228" role="img" aria-label="Beach ball floats high, log half submerged, boat partially immersed and steel ball sinks">
+<rect x="5" y="112" width="810" height="105" fill="#dff1f6"/><path d="M5 112 H815" stroke="#3399ba" stroke-width="2"/>
+<circle cx="100" cy="66" r="50" fill="#f8e5a9" stroke="#b18d2e" stroke-width="2"/><path d="M100 16 C60 45 60 85 100 116 C140 85 140 45 100 16" fill="none" stroke="#c2774c" stroke-width="3"/>
+<rect x="227" y="88" width="160" height="48" rx="24" fill="#a77a4e" stroke="#72502f" stroke-width="2"/><path d="M254 100 H365 M250 123 H360" stroke="#765233"/>
+<path d="M447 70 H597 L522 155 Z" fill="#dcb78a" stroke="#806141" stroke-width="2"/>
+<circle cx="724" cy="164" r="36" fill="#7e929f" stroke="#3e5461" stroke-width="2"/><path d="M724 108 V135" stroke="#536c79" stroke-width="2"/><path d="M724 204 V219" stroke="#bc6145" stroke-width="3"/>
+<text class="big" x="47" y="206">Beach ball</text><text class="big" x="280" y="206">Log</text><text class="big" x="500" y="206">Boat</text><text class="big" x="677" y="47">Steel ball</text><text class="small" x="665" y="70">Continues sinking</text>
+</svg><figcaption>Behavior schematic, not a shared scale drawing. Volume fraction is different from fraction of diameter or height.</figcaption></figure>
+<table><thead><tr><th>Reference object</th><th>Geometry and mass</th><th>Expected calm result</th></tr></thead><tbody>
+<tr><td>Inflated ball</td><td>60 cm diameter; 0.9048 kg, equivalent bulk density 8 kg/m³</td><td>0.9048 L displaced; 3.154 cm draft; only 0.8% of volume submerged.</td></tr>
+<tr><td>Pine-like log</td><td>3 m long × 40 cm diameter; density 500 kg/m³ → 188.50 kg</td><td>188.50 L displaced; 20 cm draft; half the cylinder volume submerged.</td></tr>
+<tr><td>Teaching V-bottom boat</td><td>3 m × 1.2 m × 0.5 m closed triangular prism; 240 kg total</td><td>240 L displaced; 25.820 cm draft; 24.180 cm freeboard.</td></tr>
+<tr><td>Solid steel wrecking ball</td><td>80 cm diameter; density 7,850 kg/m³ → 2,104.45 kg</td><td>Full capacity only 268.08 kg of fresh water; it sinks.</td></tr></tbody></table>
+<div class="callout"><b>Use measured mass when available</b><br>Wood species and moisture vary; beach balls differ in size, shell, and inflation; boats carry payload; wrecking balls may use different alloys or construction. These explicit assumptions make the calculations accurate for the chosen model. They do not identify every real object of that name.</div>
+<h3>Shared baseline for the recipes</h3>
+<p>Start with <code>FlowCoupling=1</code>, <code>BuoyancyMultiplier=1</code>, <code>InertiaScale=(1,1,1)</code>, body and project <code>WaveFeelScale=1</code>, and Stable Steps on. Retain pressure drag 0.3 linear / 1 quadratic, suction 0.3 / 0.5, viscosity multiplier 1, slam multiplier 0.5, and air coefficient 0.8 until you have a measured target. These are implementation starting values, not certified drag measurements for each object.</p>
+<p>For these controlled recipes, explicitly choose <code>Interaction=Wakes</code> so the per-body Wake switch controls the point-wake route. This is an example choice, not the component default. The distinct Waves switch controls physical wave generation/response; Wake off does not turn Waves off. You can later compare safe FluidNinja Tracking under the same conditions.</p>
+</section>
+
+<section id="balllog">
+<div class="eyebrow">10 · Light and natural objects</div>
+<h2>Beach ball and log recipes</h2>
+<div class="two"><div><h3>A 60 cm beach ball</h3><p>Use a sphere centered at the body origin, radius <b>30 cm</b>, with matching simple collision. A One Sphere preset fits radius from the average of the scaled bounds' three half-extents, so do not apply it to a stretched ellipsoid and expect an exact fit.</p></div><div><h3>A 3 m pine-like log</h3><p>Use a closed cylinder along local X, length <b>300 cm</b> and radius <b>20 cm</b>. A sufficiently detailed closed convex approximation is suitable; a bounding box will have the wrong volume and waterline.</p></div></div>
+<table><thead><tr><th>Setting</th><th>Beach ball</th><th>Log</th></tr></thead><tbody>
+<tr><td>Hull Model</td><td>Spheres</td><td>Triangles</td></tr><tr><td>Hull sampling</td><td>One pontoon at (0,0,0), Radius 30 cm, LiftWeight 1, DragWeight 1</td><td>HullResolutionCm 20; MaxHullTriangles 1000</td></tr><tr><td>Mass Mode and body kg</td><td>Body Mass; 0.904779 kg</td><td>Body Mass; 188.495559 kg</td></tr><tr><td>Rest Attitude</td><td>(0,0,0)</td><td>Zero for X-axis cylinder; Pitch 90° for a cylinder modeled along Z</td></tr><tr><td>COM and angular damping</td><td>COM centered; damping (0,0,0) baseline</td><td>COM centered; damping (0,0,0) baseline</td></tr><tr><td>Settle On Start</td><td>On for float test; off for drop</td><td>On for float test; off for drop</td></tr><tr><td>Sleep When Settled</td><td>Off while observing small wave response</td><td>On for production; off during response tests</td></tr><tr><td>Wake / Waves</td><td>Wake off; Waves on</td><td>Wake on; Waves on</td></tr><tr><td>SplashMinWatts</td><td>20 W, matching public BeachBall preset</td><td>20 W, matching public Log preset</td></tr></tbody></table>
+<h3>The ball calculation</h3>
+<div class="math">V<sub>full</sub> = 4πR³/3 = 113.097 L<br>m = 8 kg/m³ × 0.113097 m³ = 0.904779 kg<br>V<sub>cap</sub>(h) = πh²(R − h/3) = m/ρ → h = 3.15415 cm</div>
+<p>Draft h is measured from the sphere's bottom. The center sits about 26.846 cm above calm water. The shipped <code>BeachBall</code> preset uses density 8; its prose says approximately 0.8 kg at 60 cm, but the ideal sphere result is 0.905 kg. Collision approximation can explain a different applied mass. For a lighter actual ball, enter its measured kg; for example, <b>0.3 kg</b> at the same diameter gives about <b>1.80 cm</b> draft. Use the calculator for the exact chosen mass.</p>
+<h3>The log calculation</h3>
+<div class="math">V = πR²L = π × 0.2² × 3 = 0.376991 m³<br>m = 500 × V = 188.496 kg<br>m / (ρV) = 0.5 → horizontal cylinder draft = R = 20 cm</div>
+<p>A round, uniform log has almost no preferred rotation about its long axis. Near-zero roll stability can be correct. Do not automatically lower its center of mass to make it resist rolling unless the modeled log actually has a weighted or asymmetric side.</p>
+<p>The public <code>Log</code> preset uses collision-derived triangles, 20 cm resolution, density 500, and Longest Axis Flat. An alternative for this exact ideal cylinder is <b>Rest Draft 20 cm</b>. The two approaches agree for ideal geometry; an approximate collision hull changes the mass or waterline produced by the preset. <a class="ref" href="#S11">[S11]</a></p>
+</section>
+
+<section id="boatsteel">
+<div class="eyebrow">11 · Displacement and sinking</div>
+<h2>A small boat and a wrecking ball</h2>
+<h3>A boat with an explicitly defined displacement hull</h3>
+<p>Use a <b>closed triangular prism</b> as a teaching hull: length 300 cm, beam 120 cm, keel-to-gunwale height 50 cm. At each end X = ±150 cm, the Y/Z cross-section vertices are (0,0), (−60,50), and (60,50). Close the top. The pivot is at the keel midpoint. This sealed envelope models excluded water; it does not simulate flooding.</p>
+<figure><svg viewBox="0 0 820 220" role="img" aria-label="V-bottom boat cross section with waterline draft and center of mass">
+<path d="M220 25 H600 L410 195 Z" fill="#e9cfac" stroke="#96704a" stroke-width="3"/>
+<path d="M312 107 H508 L410 195 Z" fill="#94cbd9"/><path d="M50 107 H770" stroke="#3496b4" stroke-width="2"/>
+<circle cx="410" cy="127" r="5" fill="#c4553a"/><text class="label" x="420" y="143">COM 20 cm above keel</text>
+<path d="M190 25 V195 M182 25 H198 M182 195 H198" stroke="#355e70"/><text class="label" x="105" y="164">50 cm hull</text>
+<path d="M650 107 V195 M642 107 H658 M642 195 H658" stroke="#355e70"/><text class="label" x="665" y="158">25.82 cm</text><text class="label" x="665" y="178">draft</text>
+<text class="label" x="339" y="18">120 cm beam</text><text class="small" x="50" y="87">Calm water</text>
+</svg><figcaption>Analytic reference hull at 240 kg in fresh water. A real tapered boat needs its own hull analysis.</figcaption></figure>
+<div class="math">V(d) = L B d² / (2H)<br>d = √(2H m / (ρ L B)) = 25.8199 cm<br>Full volume = LBH/2 = 900 L</div>
+<p>Use <b>Triangles</b>, resolution <b>20–30 cm</b>, budget <b>1000</b>, Body Mass <b>240 kg</b>. Settle On Start on, Waves on, Wake on, propulsion off for the first hydrostatic test, and Splash Min Watts 300. Target a center of mass <b>20 cm above the keel</b>. If Chaos starts at the uniform prism centroid 33.333 cm above keel, COM offset Z = <b>−13.333 cm</b> achieves that at unit scale; verify the actual COM before copying the offset.</p>
+<p>Ideal roll GM is about <b>22.0 cm</b> for that mass center. An extra centered 80 kg gives total mass 320 kg and draft <b>29.814 cm</b>, about 3.99 cm deeper. A rider placed to one side changes both load and balance. The flat-ended prism has unusually strong pitch stability; it is an explanatory hull, not a prediction for all dinghies.</p>
+<div class="callout note">The public <b>BoatHull</b> preset chooses <b>13 cm Rest Draft</b> and 30 cm triangles. On this V-hull, 13 cm corresponds to only <b>60.84 kg</b>. A draft preset is not a universal boat mass. Use total known boat-and-payload kg for a real vessel.</div>
+<h3>An 80 cm solid steel wrecking ball</h3>
+<p>Use matching sphere geometry/collision, one pontoon at the origin with <b>radius 40 cm</b> and both weights 1. Set Body Mass to <b>2,104.448 kg</b> for the chosen steel density 7,850 kg/m³. Turn <b>Settle On Start off</b>, enable CCD, keep Waves on, Wake on, and use Splash Min Watts 20 as a starting visual floor.</p>
+<div class="math">V = 4π × 0.4³/3 = 0.268083 m³<br>Mass = 7,850 × V = 2,104.448 kg<br>Maximum buoyancy = 1,000 × 9.8 × V = 2,627.21 N<br>Weight = 20,623.59 N → net 17,996.38 N downward before drag</div>
+<p>It still receives upward buoyancy; that force is too small to support it. Drag opposes sinking, while the bed or a crane constraint ultimately controls its motion. The buoyancy component does not create a cable or crane. A suspended wrecking ball needs an appropriate Chaos constraint as a separate system.</p>
+<p>The shipped <code>WreckingBall</code> preset assumes iron at <b>7,800 kg/m³</b> and inherits settling on; turn settling off for a drop. Its density differs from this example's chosen steel value. Use the density of the material you intend, or enter a measured body mass directly. <a class="ref" href="#S11">[S11]</a></p>
+</section>
+
+<section id="calculator">
+<div class="eyebrow">12 · Explore the relationships</div>
+<h2>Buoyancy calculator</h2>
+<p>This ideal-geometry calculator solves calm-water displacement. It is useful for catching a unit error or an impossible floating mass before opening the editor. It does not calculate waves, drag, collision contact, flooding, or capsize.</p>
+<div class="noprint">
+<p><button onclick="presetCalc('ball')">Ball</button> <button onclick="presetCalc('log')">Log</button> <button onclick="presetCalc('boat')">V boat</button> <button onclick="presetCalc('steel')">Steel ball</button></p>
+<div class="calcgrid"><div>
+<label>Ideal shape<select id="shape"><option value="sphere">Sphere</option><option value="cylinder">Horizontal cylinder</option><option value="vboat">Closed V-prism boat</option><option value="box">Rectangular sealed box</option></select></label>
+<label>Radius cm for sphere or cylinder<input id="radius" type="number" min="0.01" step="0.1" value="30"></label>
+<label>Length cm for cylinder or prism<input id="length" type="number" min="0.01" value="300"></label>
+<label>Beam or width cm for prism<input id="width" type="number" min="0.01" value="120"></label>
+<label>Height cm for prism<input id="height" type="number" min="0.01" value="50"></label>
+<label>Total object mass kg<input id="mass" type="number" min="0.0001" step="0.01" value="0.904778684"></label>
+<label>Water density kg per cubic metre<input id="rho" type="number" min="1" value="1000"></label>
+</div><div><div id="calcresult" class="calcresult" aria-live="polite"></div><svg viewBox="0 0 300 235" role="img" aria-label="Vertical draft as a fraction of body height"><rect x="80" y="45" width="140" height="150" rx="4" fill="#f0e1c7" stroke="#947649"/><rect id="watermark" x="80" y="185" width="140" height="10" fill="#85c4d7"/><text class="small" x="55" y="219">Draft fraction only; not a shape drawing</text></svg></div></div>
+</div>
+<div class="printonly callout">Open the companion HTML guide to change the dimensions and mass interactively. The table below records the reference examples for this printable edition.</div>
+<table><thead><tr><th>Shape</th><th>Volume formula</th><th>Draft relationship</th></tr></thead><tbody>
+<tr><td>Sphere</td><td>4πR³/3</td><td>πh²(R − h/3) = m/ρ</td></tr><tr><td>Horizontal cylinder</td><td>πR²L</td><td>L[R² acos((R−h)/R) − (R−h)√(2Rh−h²)] = m/ρ</td></tr><tr><td>Rectangular box</td><td>LWH</td><td>h = m/(ρLW)</td></tr><tr><td>Closed V prism</td><td>LBH/2</td><td>h = √(2Hm/(ρLB))</td></tr></tbody></table>
+<p>All formulas here use consistent SI units internally. The displayed draft is centimetres. The cylinder lies horizontal; the V-prism has straight sides and a level keel. If mass equals full water capacity, the ideal object is neutral when fully submerged, without a unique freeboard. If mass is greater, no floating draft exists.</p>
+<h3>A change to try</h3>
+<p>Keep the log at 3 m × 40 cm. Its full displacement is about 377 L, so a 453.6 kg log of the same geometry sinks. Increasing weight while keeping dimensions fixed changes average density. A heavier log made of the same 500 kg/m³ wood needs a larger volume instead.</p>
+</section>
+
+<section id="propulsion">
+<div class="eyebrow">13 · Gameplay integration</div>
+<h2>Add propulsion and steering to your boat</h2>
+<p>The FluidNinja Buoyancy component includes a simple propeller-and-rudder model. It applies thrust and rudder force alongside the hull's water forces. Your Blueprint or C++ gameplay supplies <code>Throttle</code> and <code>Rudder</code>; the plugin does not require a boat data asset, seating system, or animation framework. <a class="ref" href="#S1">[S1]</a> <a class="ref" href="#S18">[S18]</a></p>
+<figure><svg viewBox="0 0 820 168" role="img" aria-label="Boat control path from game input through throttle and rudder to submerged forces and Chaos">
+<rect class="box" x="5" y="20" width="180" height="110" rx="8"/><text class="big" x="20" y="51">Your game input</text><text class="label" x="20" y="79">Player or AI controls</text><text class="small" x="20" y="105">Your movement logic</text>
+<rect class="box" x="214" y="20" width="180" height="110" rx="8"/><text class="big" x="229" y="51">Body controls</text><text class="label" x="229" y="79">Throttle · Rudder</text><text class="small" x="229" y="105">Each from −1 to +1</text>
+<rect class="box" x="423" y="20" width="180" height="110" rx="8"/><text class="big" x="438" y="51">Submerged points</text><text class="label" x="438" y="79">Propeller · rudder</text><text class="small" x="438" y="105">Forces at authored locations</text>
+<rect class="box" x="632" y="20" width="182" height="110" rx="8"/><text class="big" x="647" y="51">Chaos body</text><text class="label" x="647" y="79">Translation + torque</text><text class="small" x="647" y="105">Water forces stay active</text>
+<path class="arrow" d="M185 75 H209"/><path class="arrow" d="M394 75 H418"/><path class="arrow" d="M603 75 H627"/>
+</svg><figcaption>The component produces forces at two independently sampled water locations. Game controls are optional consumers of its public properties.</figcaption></figure>
+<table><thead><tr><th>Propulsion property</th><th>Public source default</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Propulsion / Console Control</td><td>Off / On</td><td>Enable propulsion for a powered boat. Disable Console Control when gameplay owns the controls.</td></tr><tr><td>Thrust Location / Direction</td><td>(0,0,0) cm / +X</td><td>Application point and ahead direction in the body's frame.</td></tr><tr><td>Max Thrust / Prop Wash Speed</td><td>1500 N / 300 cm/s</td><td>Full-throttle push and signed flow contribution used at the rudder.</td></tr><tr><td>Rudder Location / Area</td><td>(0,0,0) cm / 900 cm²</td><td>Force point and blade area. Area 0 disables rudder force.</td></tr><tr><td>Max Rudder Angle</td><td>35°</td><td>Angle at full left or right input.</td></tr><tr><td>Throttle / Rudder</td><td>0 / 0</td><td>Blueprint-writable inputs, clamped to [−1,1] for physics.</td></tr></tbody></table>
+<h3>A concrete integration for the teaching boat</h3>
+<ol><li>First complete the 240 kg V-hull's calm-water test with propulsion off. Orient the hull so the bow is local <b>+X</b> and right is <b>+Y</b>.</li><li>Before Play, enable Propulsion. As an <b>illustrative placement</b>, put both Thrust Location and Rudder Location at <b>(−140,0,10) cm</b> in this hull's keel-origin frame. They sit near the stern and below its calculated 25.82 cm waterline. For your mesh, use its actual geometry, pivot, and waterline instead.</li><li>Keep Thrust Direction +X. Start with Throttle and Rudder at zero. Map a forward/reverse input to Throttle and a left/right input to Rudder; reset them to zero when input ends. Use Console Control off for this gameplay path.</li><li>Test a small throttle, then steering while moving. Verify the forces disappear when their own points leave the water. A dry rudder does not steer just because the hull is floating.</li></ol>
+<div class="math">F<sub>thrust</sub> = Throttle × MaxThrustNewtons × direction<br>U = dot(v<sub>body point</sub> − v<sub>current</sub>, forward) + Throttle × PropWashSpeed<br>C<sub>L</sub> = clamp(2π × rudder angle in radians, −1.2, 1.2)<br>F<sub>rudder</sub> = −right × ½ρ A C<sub>L</sub> U |U|<br>Torque = (force point − center of mass) × force</div>
+<p>The rudder uses the point's linear and angular body motion, horizontal current scaled by Flow Coupling, and propeller wash. Convert area to m² and speed to m/s if evaluating this equation in SI units. At the default 1500 N maximum, Throttle 0.2 commands <b>300 N</b> when the propeller point is wet. For the 240 kg example, F/m is <b>1.25 m/s²</b> before drag, added-mass response, and other forces. It is a force estimate, not a promised acceleration or top speed. <a class="ref" href="#S2">[S2]</a> <a class="ref" href="#S18">[S18]</a></p>
+<div class="callout note"><b>The rudder assumes body +X forward</b><br>Thrust Direction can change the propeller direction, but the built-in rudder still uses the body's X/Y axes. Rotating that one property does not rotate the rudder model. Also, the default force points are at the origin: move them to meaningful locations or they may be dry or provide little turning leverage.</div>
+<p>For console testing, enable Console Control and use <code>fnb.Boat.Throttle 0.2</code> and <code>fnb.Boat.Rudder 0.25</code>, then set both to 0. Changes affect all bodies with Propulsion and Console Control enabled, not only the selected boat. <a class="ref" href="#S4">[S4]</a></p>
+<p>Seats, boarding, animation-driven oars, passenger loading, and network authority belong to your game. Include payload in the total mass and balance used by your hull setup, and test changes against the intended waterline. The plugin's propeller-and-rudder controls do not automatically add a passenger's mass or implement those gameplay systems.</p>
+</section>
+
+<section id="watersettings">
+<div class="eyebrow">14 · Water setup and quality</div>
+<h2>Configure the water that objects use</h2>
+<p>There are four scopes of control: project settings choose shared defaults, a Wave Sim component describes one simulation, each buoyancy component describes one body, and material parameters control appearance. Confusing those scopes is a common cause of inconsistent behavior.</p>
+<table><thead><tr><th>Setting</th><th>Current source default</th><th>Practical use</th></tr></thead><tbody>
+<tr><td>Capture Width / Resolution</td><td>8,000 cm / 1024</td><td>About 7.81 cm base texel size across an 80 m square. Wider coverage at fixed resolution is coarser.</td></tr><tr><td>GPU Gather / grid limit</td><td>On / 128 across per body</td><td>Batch water sampling; large footprints may be sampled more coarsely.</td></tr><tr><td>Max Extrapolation</td><td>0.08 s</td><td>Limits height prediction from old readbacks.</td></tr><tr><td>Water Density / Stable Steps</td><td>1000 kg/m³ / On</td><td>Fresh-water support and handling of stiff light-body response.</td></tr><tr><td>Flow Scale / Max Flow</td><td>1 / 600 cm/s</td><td>Converts and caps sampled current. Keep this separate from per-body Flow Coupling.</td></tr><tr><td>Wave Damping / Breaking Slope</td><td>0.02 s⁻¹ / 1</td><td>Decay and suppression of excessively steep features.</td></tr><tr><td>Wave Impulse / Added Mass scale</td><td>0.35 / 1</td><td>Entry-wave coupling and inertia of entrained water.</td></tr><tr><td>Foam Decay</td><td>0.7 s⁻¹</td><td>Trail lifetime; lower persists longer. Does not change lift.</td></tr></tbody></table>
+<h3>Give each simulation a depth and edge policy</h3>
+<p>Add <b>FluidNinja Wave Sim</b> to a NinjaLive actor for settings that travel with the level. Its component takes precedence over a matching name-based entry in project <code>WaveSims</code>. Set one authority deliberately rather than editing both. <a class="ref" href="#S14">[S14]</a></p>
+<table><thead><tr><th>Per-simulation property</th><th>Default</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>Depth Cm</td><td>200</td><td>Constant depth when Depth From Bed is off. Use the actual modeled depth.</td></tr><tr><td>Depth From Bed</td><td>Off</td><td>On uses the core's bed field; missing bed falls back to project WaveDepthCm, not this component's DepthCm.</td></tr><tr><td>Walled</td><td>Off</td><td>Off absorbs outgoing waves at window edges; on reflects them with wall absorption.</td></tr><tr><td>Wall Absorption / Band</td><td>0.4 s⁻¹ / 50 cm</td><td>Energy loss near the simulation-window wall. It does not create physical collider walls.</td></tr><tr><td>Scale Down Override</td><td>0</td><td>0 follows quality; 1/2/4 chooses full/half/quarter wave-grid width.</td></tr><tr><td>Importance</td><td>1</td><td>Higher priority when only the nearest weighted simulations receive active waves.</td></tr></tbody></table>
+<p>Choose depth from the water body you intend to model. For example, a 2 m test pool can use Depth Cm 200 with Depth From Bed off; choose reflective or absorbing edges according to the test. This is an illustrative setup, not an automatic measurement of the scene. A height field that sees the water mesh rather than the bed produces a wrong depth; use a known constant depth for that setup.</p>
+<p><b>Water outside the capture:</b> the generic far-field path uses a <code>PhysicsVolume</code> with <b>Water Volume</b> enabled. It takes the volume bounding box's top as a flat water height and checks horizontal coverage. Align that top with the intended still-water surface. This supplies simpler fallback coverage; it does not extend the GPU simulation or reproduce local waves outside its window. <a class="ref" href="#S4">[S4]</a></p>
+<h3>Budget behavior</h3>
+<p><code>sg.WaterQuality -1</code> follows Effects quality; 0–4 selects a tier. For the current plugin tier config, Low uses scale-down 4 and one active wave sim; Medium 2 and two; High 1 and three; Epic 1 and four; Cinematic 1 with no active-sim cap. Own-field reach is also reduced at lower tiers. Inspect <code>stat FluidNinjaBuoyancy</code>, <code>fnb.Memory</code>, and <code>fnb.Waves.Memory</code> in the intended workload.</p>
+<p>Halving grid width cuts wave Prepare/Step/Aux cells to one quarter, but export still writes the original pressure resolution. Do not promise a fourfold total GPU speedup. Multiple simulations have independent windows; their waves do not automatically propagate across each other's boundaries.</p>
+</section>
+
+<section id="feedback">
+<div class="eyebrow">15 · Visible interaction</div>
+<h2>Waves, brush wakes, foam, and splashes</h2>
+<p>These effects share a scene, but use different data and controls. Tuning the wrong one can change current when you only meant to make whitewater more visible.</p>
+<table><thead><tr><th>Path</th><th>Input and result</th><th>Controls</th></tr></thead><tbody>
+<tr><td>Physical wave field</td><td>Static hull head and force-derived impulses → propagating surface waves.</td><td>Waves, WaveFeelScale, WaveDisplacement, WaveImpulseScale, depth and damping.</td></tr><tr><td>Relative tracking</td><td>Selected primitive motion relative to water → FluidNinja painter interaction.</td><td>Interaction, tracking volume/filter/tag, relative switch, density suppression.</td></tr><tr><td>Point wakes</td><td>Waterline push and plunge contacts → Niagara Data Channel brush points.</td><td>Wake, WakeGain, WakeStrength, PlungeGain/Response, point reader and budgets.</td></tr><tr><td>Wave foam</td><td>Breaking, waterline shear, and impacts → independent visible foam field.</td><td>Foam enable/decay/source gains, WaveFoam material controls; interface 4.</td></tr><tr><td>Splash and audio</td><td>Entry/slam/bow activity → Niagara and sound instances.</td><td>Power floors, reference watts, strength ceilings, scale, intervals and budgets.</td></tr></tbody></table>
+<h3>Entry and slam are now separate</h3>
+<p>The C++ force integrator collects growing wet area across the body before distributing its slam, with an inward-speed gate of 50 cm/s. A mass-limited force prevents a piecewise water-entry impulse from arbitrarily stopping more than its supported share of the body in one step.</p>
+<div class="math">G = Σ(dA<sub>i</sub>/dt), Q = Σ((dA<sub>i</sub>/dt) v<sub>i</sub>), v̄ = Q/G<br>F<sub>slam</sub> = min[SlamMultiplier ρ Q beam, (m v̄/Δt) min(2A<sub>participating</sub>/A<sub>hull</sub>, 1)]<br>P<sub>entry</sub> = m v<sub>down</sub>³ / (2H<sub>body</sub>)<br>Splash strength ≈ (power / SplashReferenceWatts)<sup>1/3</sup></div>
+<p>Entry power is a visual estimate of kinetic energy delivered over an entry time; it is not an extra physical force. The default reference is <b>70 W</b>; body and project ceilings normally cap strength at <b>12</b> before the final art scale. Twice the visible scale requires eight times the power before those caps. Splash Min Watts gates repeated slam splashes; setting it to zero does not disable entry splashes or bow spray. <a class="ref" href="#S2">[S2]</a> <a class="ref" href="#S5">[S5]</a></p>
+<p><b>For more white wake:</b> first tune interface-4 foam or its material strength. Point-wake gains inject into FluidNinja's flow/density interaction and can alter river speed. Neither a symmetric burst nor a gain below 1 guarantees conservation in the full nonlinear flow setup. Compare mean current before and after adding interacting bodies when calibrating this route.</p>
+<h3>Hull wetness and sound</h3>
+<p>Wet Line writes four contiguous Custom Primitive Data slots starting at <code>WetLineDataIndex</code> (default 0). The hull material needs <code>MF_FNB_HullWetness</code> or equivalent water-plane CPD integration. Enabling the property alone does not change an arbitrary material. Reserve those slots to avoid collisions with other material features. Drying Speed defaults to 1.5 cm/s. <a class="ref" href="#S1">[S1]</a> <a class="ref" href="#S18">[S18]</a></p>
+<p>The plugin exposes configurable splash and sound assets. Assign the assets appropriate to your project; slap, wash, creak, and optional drip have separate roles. Check visibility distance and global effect budgets when physics is correct but spray is missing.</p>
+</section>
+
+<section id="api">
+<div class="eyebrow">16 · Extending the system</div>
+<h2>Queries, swimmers, and integration points</h2>
+<p>Gameplay should consume the plugin's water API rather than independently decode GPU textures. This preserves the chosen source mapping, readback age, and wave convention.</p>
+<table><thead><tr><th>Interface</th><th>What to use it for</th></tr></thead><tbody>
+<tr><td>Get Water At Location</td><td>Request/sample water at a point. Call each frame for a moving query, and handle a missing or delayed answer.</td></tr><tr><td>Filter Drift Current</td><td>Smooth noisy current and dead-band small speeds. Source defaults are 0.5 s smoothing and 10 cm/s dead band.</td></tr><tr><td>Get Swimmer Water</td><td>Read the registered swimmer's shared water sample and filtered drift current.</td></tr><tr><td>Poke At</td><td>Apply a localized wave impulse for a footstep or paddle. Strength is N·s; visual splash and sound remain separate.</td></tr><tr><td>Get Readout / Get Status</td><td>Inspect a buoyant body's diagnostic physics state or human-readable status.</td></tr><tr><td>On Slam / On Water Contact Changed</td><td>Trigger gameplay from slam power or entering/leaving water.</td></tr><tr><td>Mark Teleported</td><td>Reset wave bookkeeping after a manual body relocation.</td></tr></tbody></table>
+<h3>A robust query flow</h3>
+<pre>Each game update
+  Get Water At Location(position) → success, sample
+  If no water: use the gameplay dry state
+  If water:
+    use SurfaceZ and Depth for the surface relationship
+    check bFromPatch to distinguish capture from far-field height
+    check bHasCurrent and bHasWaves before trusting those fields
+    inspect AgeSeconds, then filter Current for movement
+  Ask again next update as the character moves</pre>
+<p>For swimmers, <code>SurfaceZ = StillZ + η</code>, with <code>η = pressure.B − pressure.A</code>. <code>Depth = SurfaceZ − query.Z</code> is negative above water. Current is horizontal; its Z component is zero. The returned normal comes from the wave slope. A query can use an existing body's capture patch, otherwise a known far-field water surface. An arbitrary point query does not create a fresh whole-scene capture by itself. <a class="ref" href="#S13">[S13]</a></p>
+<p>The plugin supports swimmer registration and a <b>FluidNinja Swimmer</b> component for body-part contacts, displacement, and wave impulses. The component registers its mesh and exposes <code>GetWater</code>, <code>GetDriftCurrent</code>, and stroke controls. Your movement code must consume the water sample and current; registering a swimmer does not create a swimming locomotion system. <a class="ref" href="#S21">[S21]</a> <a class="ref" href="#S22">[S22]</a></p>
+<p>For a custom movement system, implement <code>IFluidNinjaSwimmerProvider::GetSwimmerPose</code>, a Blueprint-native interface event, or derive a swimmer component in C++. A swimmer profile configures its body-part contacts. The plain C++ virtual state hooks are not automatically Blueprint override events. Wind is supplied through the plugin's world-space <code>Wind</code> setting in cm/s, with zero wind by default; your weather system can provide that input. <a class="ref" href="#S24">[S24]</a> <a class="ref" href="#S25">[S25]</a> <a class="ref" href="#S5">[S5]</a></p>
+<div class="callout note"><b>Readout is diagnostic, not the final net force</b><br><code>ForceN</code> reports raw hydrodynamic integration. The callback subsequently adjusts forces for radiation damping, stable steps, and added mass. Gravity and character contacts are separate. Do not infer exact body acceleration by dividing this readout by mass.</div>
+<p>Not every property marked editable has a Blueprint setter. The explicit runtime controls include Throttle, Rudder, Interaction, Waves, and Wave Feel Scale; use the declared APIs. Hull rebuilding and arbitrary live preset swapping are not established by these headers.</p>
+</section>
+
+<section id="mathdetail">
+<div class="eyebrow">17 · Mathematical reference</div>
+<h2>What the force integrator computes</h2>
+<p>This section links the simple Archimedes explanation to the implementation. Use consistent units when evaluating formulas. The public density is kg/m³; the integrator converts it to kg/cm³, and converts force and power back to N and W for readouts.</p>
+<h3>Triangle pressure and center of pressure</h3>
+<div class="math">F<sub>piece</sub> = −n ρ g h A × BuoyancyMultiplier<br>D = d₁ + d₂ + d₃<br>r<sub>pressure</sub> = [(D+d₁)r₁ + (D+d₂)r₂ + (D+d₃)r₃] / (4D)</div>
+<p>A triangle is clipped at the sampled waterline. For each wet piece, n is outward normal, A is area, h is mean depth, and dᵢ are vertex depths. Pressure grows linearly with depth. The depth-weighted point matters: applying every force at the triangle centroid can give the wrong righting torque even when total lift is correct. <a class="ref" href="#S2">[S2]</a></p>
+<h3>Triangle pressure drag and skin friction</h3>
+<div class="math">s = |v<sub>relative</sub>| / (1 m/s), q₀ = ½ρ(1 m/s)²<br>c = n · normalize(v<sub>relative</sub>)<br>For c &gt; 0: F<sub>pressure</sub> = −n q₀ A (C<sub>p1</sub>s + C<sub>p2</sub>s²)c<sup>f<sub>p</sub></sup><br>For c ≤ 0: F<sub>suction</sub> = +n q₀ A (C<sub>s1</sub>s + C<sub>s2</sub>s²)(−c)<sup>f<sub>s</sub></sup><br>C<sub>friction</sub> = 0.075 / (log₁₀ Re − 2)²</div>
+<p>Skin friction opposes tangential velocity with a ½ρC A v² scale. Reynolds number uses hull length and viscosity, with a minimum of 100,000 in this implementation. Spheres and voxels use a projected-section drag approximation rather than the triangle suction/falloff model. Their geometry scale means a textbook sphere drag coefficient is not automatically a calibrated terminal-speed setting here.</p>
+<h3>Spheres and voxels</h3>
+<div class="math">Sphere h = clamp(water Z − center Z + R, 0, 2R)<br>V<sub>cap</sub> = πh²(3R − h)/3<br>Voxel wet fraction = clamp((water Z − center Z)/cell size + ½, 0, 1)</div>
+<p>A sphere's lift is ρgV<sub>cap</sub> times LiftWeight and the buoyancy multiplier. Explicit pontoons are summed, not Boolean-unioned. Voxels share the collision volume across retained interior samples; their simple vertical wet fraction is not exact rotated cube clipping. The triangle surface is still retained for wave-source displacement, so a sphere/voxel lift model should remain consistent with collision geometry.</p>
+<h3>Implicit treatment of unresolved response</h3>
+<div class="math">Δv = Δt (F + W + A a<sub>water</sub> − θ Δt K<sub>excess</sub> v)<br>÷ (m + A + Δt C<sub>excess</sub> + θ Δt² K<sub>excess</sub>)</div>
+<p>This heave expression shows Stable Steps with excess stiffness K, excess damping C, added mass A, signed gravitational force W (negative in upward-positive Z), and filtered water acceleration. θ defaults to 1. The actual force is rewritten so Chaos reaches this velocity change using its own body mass. Analogous inertia/torque handling applies to rotation. Stiffness and damping already resolved by the step are left explicit. Stability can include numerical damping; it is not a guarantee of identical motion at every frame rate. <a class="ref" href="#S2">[S2]</a> <a class="ref" href="#S3">[S3]</a></p>
+<p>The sampled height rate helps predict height but is not used as vertical drag-current velocity; that current remains horizontal. Added mass has a separate filtered water-acceleration estimate. This distinction prevents abrupt visual height changes from becoming spurious vertical drag kicks.</p>
+</section>
+
+<section id="validation">
+<div class="eyebrow">18 · Verification and troubleshooting</div>
+<h2>Know when the setup is correct</h2>
+<p>Validate static support before evaluating waves and spray. A good visual splash does not prove a physically meaningful mass or waterline. Build a small test level with a tagged water surface, one compatible NinjaLive, and one object from these recipes. Keep its dimensions, mass, gravity, water depth, quality tier, and source versions with the results so another person can repeat the test.</p>
+<table><thead><tr><th>Test</th><th>What to observe</th><th>What a failure suggests</th></tr></thead><tbody>
+<tr><td>Hull analysis</td><td>Correct dimensions, full volume, mass mode, solved draft, and plausible GM.</td><td>Scale error, overlap, wrong primitive, thin-shell collision, or wrong mass authority.</td></tr><tr><td>Calm settle</td><td>Displaced litres ≈ mass kg in fresh water with lift gain 1.</td><td>Wrong body mass, collisions holding it up, waves/current still active, or coarse hull.</td></tr><tr><td>Small push</td><td>Damped motion and expected righting/rolling behavior.</td><td>Bad COM, excessive damping, unresolved stiffness, or mistaken cylinder roll expectation.</td></tr><tr><td>Current drift</td><td>Body approaches water motion; river does not progressively accelerate from floaters.</td><td>Tracking density feedback, wrong flow conversion, or overdriven point wakes.</td></tr><tr><td>Controlled drop</td><td>Settle disabled; measured entry speed, EntryWatts/SlamWatts, wave and spray paths.</td><td>Settling canceled the fall, missing water readback, effects budget, or core mismatch.</td></tr><tr><td>Neighbor wave</td><td>Drop A; watch B respond; check B has its own field and Waves/feel enabled.</td><td>Separate sim windows, stale patches, quality/atlas fallback, or wave controls off.</td></tr><tr><td>Walk away and return</td><td>Sleep/LOD/re-entry behavior is acceptable at intended quality.</td><td>Body or surface not rediscovered, limits too low, or assumptions about distant wave response.</td></tr></tbody></table>
+<h3>Current diagnostic commands</h3>
+<pre>fnb.CheckSetup                 editor setup audit
+fnb.Buoyancy 2                 physics and water debug view
+fnb.Buoyancy -1                restore project policy
+fnb.TestHUD 1                  enable developer panel in PIE
+fnb.Test help                  list supported tests
+fnb.Test run settle            controlled settling test
+fnb.Test run drop              controlled drop test
+fnb.Test run gather            compare sampling paths
+fnb.Test run ripples           wave test suite
+stat FluidNinjaBuoyancy        runtime counters
+fnb.Memory                    readback / runtime memory
+fnb.Waves.Memory              wave resources</pre>
+<p>Debug overrides <code>fnb.Buoyancy.Wake</code>, <code>.Gather</code>, and <code>.Implicit</code> accept −1 for project policy, 0 off, 1 on. The test HUD defaults off and belongs to the optional developer module. Use <code>fnb.Test help</code> to inspect the tests available in your build. Do not use unsafe tracking force-handover as a normal fix. <a class="ref" href="#S20">[S20]</a></p>
+<div class="callout note"><b>Keep evidence for your installed combination</b><br>Run the relevant tests against the exact core, plugin, collision assets, and settings you will ship. Record test reports and repeat important measurements after changing them. Source explanations and the calculated examples in this guide are not runtime pass results.</div>
+<h3>Known model and product limits</h3>
+<p>The capture is a top-down height representation. It cannot resolve overhanging water sheets, overturning breakers, full underwater 3D flow, or physically conserved filling/flooding of a hull. Readback remains delayed. Source limits and quality fallbacks affect distant response. Include wave amplitude, long-term mean water level, and closed-basin behavior in tests when those matter to your game.</p>
+<p>Test your intended platform, rendering path, physics settings, packaged build, and network authority explicitly. A dedicated server has no rendered Surface Mirror; simpler known water coverage cannot reproduce every GPU wave or current detail. The force and query APIs do not by themselves define multiplayer authority or replication. <a class="ref" href="#S4">[S4]</a></p>
+</section>
+
+<section id="maintenance">
+<div class="eyebrow">19 · Core versions and maintenance</div>
+<h2>Keep the plugin and core compatible</h2>
+<p>The plugin's editable HLSL and editor toolchain live under <code>Tools/CorePatch</code>. The generated Niagara and material packages live under FluidNinja content. A vendor update can replace those modifications, so upgrading FluidNinja is a compatibility task rather than a content copy alone.</p>
+<table><thead><tr><th>Core interface</th><th>Capability</th><th>Compatibility meaning</th></tr></thead><tbody>
+<tr><td>Relative tracking only</td><td>Painter changes, no versioned wave interface</td><td>Insufficient for the current wave contract.</td></tr><tr><td>2</td><td>Versioned waves, corrected breaking/edge behavior</td><td>Current minimum wave interface; full-resolution wave grid, no new foam.</td></tr><tr><td>3</td><td>Independent wave-grid scale-down</td><td>Supports 1/2/4 grid width choices.</td></tr><tr><td>4</td><td>Foam field plus matching material foam/choppy additions</td><td>Current toolchain capability; needed for independent wave foam.</td></tr></tbody></table>
+<p>Check the installed core's interface and build values through the setup checker and the core tool's <code>verify</code> report. Record those results with the plugin source revision and matching material capability. A plugin version number such as 1.0.1 is not a substitute for checking the actual core assets and buffers. <a class="ref" href="#S4">[S4]</a> <a class="ref" href="#S9">[S9]</a></p>
+<h3>Safe implementation sequence</h3>
+<ol>
+<li>Record the plugin source revision, FluidNinja version, current core interface/build, and known-good test reports. Preserve a recoverable copy of the affected assets before patching.</li>
+<li>Run the editor setup checker, then close the editor before the core tool's commandlet <code>verify</code> or patch workflow. Require its report to identify the core and finish <code>RESULT PASS</code>; read warnings about older capabilities.</li>
+<li>For a new vendor version, first port the relative-tracking graph changes. The tool's <code>tracking</code> step is <b>not implemented</b>; it cannot automatically turn a pristine vendor core into the required safe base.</li>
+<li>From the supported relative-tracking base, follow the tool's <code>core material verify</code> workflow. The core step refuses a core already carrying waves; use the documented reapplication/backup procedure rather than blindly applying twice.</li>
+<li>Perform material changes in a fresh commandlet/editor process before PIE, following the patch tool's workflow.</li>
+<li>Open the intended level, validate surfaces and sim assignments, then run settling, drift, entry, neighbor-wave, and intended-quality tests. Keep the compile and test reports with your recorded version information.</li>
+</ol>
+<p>The patch changes <code>NinjaLiveCore</code>, <code>Core/Functions/PainterSourceData</code>, <code>Core/Modules/Ninja_Painter</code>, the generated <code>Core/Modules/Waves/*</code>, and <code>OutputMaterials/Base/MF_NinjaOutput_BaseFunction_SURFACE</code>. The tracking and wave layers have different authoring steps. Read the plugin's <code>Tools/CorePatch/README.md</code> and <code>Tools/CorePatch/TRACKING.md</code> before maintaining them.</p>
+<p class="equation-note"><b>Presets:</b> Keep custom presets in project content; <code>Tools/make_presets.py</code> rewrites the shipped library. Customize a copy or update its generator deliberately.</p>
+</section>
+
+<section id="reference">
+<div class="eyebrow">20 · Searchable implementation reference</div>
+<h2>Property reference</h2>
+<p>The tables below are generated from the current public editable declarations: <b>{{PROPERTY_COUNT}} properties</b> across the body component, project settings, per-simulation component, and preset data asset. Names are exact C++ identifiers so you can search source or Details. Unreal generally displays them as spaced labels and removes the boolean b prefix.</p>
+<p><b>Header defaults are not saved instance values.</b> Constructors, configuration, presets, Blueprints, and actor instances can replace them. “Constructor / empty” means no initializer in that declaration. Edit conditions can hide or disable a property. Some descriptions summarize source comments; use the earlier chapters for model limits and behavior.</p>
+<input class="searchbar noprint" id="propertySearch" type="search" placeholder="Search name, category, units, or meaning" aria-label="Filter property reference">
+<div class="callout"><b>Separate defaults from recipes</b><br>The component starts with Interaction = FluidNinjaTracking, Mass Mode = Rest Draft, and Rest Draft = 15 cm. The recipes explicitly choose their mass, hull, and interaction settings. Apply those choices deliberately and inspect the resulting component rather than assuming a preset changes every property. <a class="ref" href="#S1">[S1]</a> <a class="ref" href="#S12">[S12]</a></div>
+<!-- PROPERTY_REFERENCE -->
+<h3>Pontoon fields</h3>
+<table><thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead><tbody><tr><td>Location</td><td>(0,0,0)</td><td>Already-scaled body-frame cm.</td></tr><tr><td>Radius</td><td>25 cm</td><td>Already-scaled sphere radius.</td></tr><tr><td>LiftWeight</td><td>1</td><td>Scales that sphere's buoyant contribution.</td></tr><tr><td>DragWeight</td><td>1</td><td>Scales that sphere's drag contribution.</td></tr></tbody></table>
+</section>
+
+<section id="sources">
+<div class="eyebrow">21 · Evidence and terminology</div>
+<h2>Source map and glossary</h2>
+<p>The source map lists paths relative to the FluidNinja Buoyancy plugin package. Locate the same paths in your installed plugin or source distribution; no particular project folder or installation path is assumed. <code>source_manifest.json</code> records SHA-256 values of the inspected text sources so a maintainer can identify differences. The guide itself is self-contained, and no Unreal binary package was read to create it.</p>
+<ul class="sources"><!-- SOURCE_LIST --></ul>
+<h3 id="external">Primary background references</h3>
+<ul class="sources">
+<li><a href="https://majorsmash.github.io/fnl-docs-v2/manual/ninjalive2-manual/">FluidNinja LIVE 2 manual</a>, section 14.8 and model limitations. Consulted 18 October 2026; the guide's custom capabilities are established by local code, not attributed to the vendor.</li>
+<li><a href="https://www.grc.nasa.gov/WWW/K-12/WindTunnel/Activities/buoy_Archimedes.html">NASA Glenn on Archimedes' principle</a>: buoyancy equals displaced fluid weight.</li>
+<li><a href="https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/drag-equation/">NASA Glenn on the drag equation</a>: density, speed squared, reference area, and coefficient.</li>
+<li><a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/physics-sub-stepping-in-unreal-engine">Epic on physics sub-stepping</a>: smaller time steps trade CPU cost for better-resolved physics. The plugin's Stable Steps implementation is separately documented by source.</li>
+</ul>
+<h3>Glossary</h3>
+<table><thead><tr><th>Term</th><th>Plain meaning</th></tr></thead><tbody>
+<tr><td>Draft / freeboard</td><td>Depth of the hull's lowest point below water / height of the deck or rim above water.</td></tr><tr><td>Displacement</td><td>Water volume excluded by the immersed hull; also used for the corresponding supported mass.</td></tr><tr><td>Heave / roll / pitch / yaw</td><td>Vertical translation / side-to-side tilt / bow-up-and-down tilt / horizontal turning.</td></tr><tr><td>Hydrostatics / hydrodynamics</td><td>Support and balance at rest / forces from relative motion.</td></tr><tr><td>Readback / patch</td><td>Asynchronously copied GPU data / a body-specific grid of sampled water.</td></tr><tr><td>Static head</td><td>The equivalent water-depth source produced by the immersed hull footprint.</td></tr><tr><td>Radiation damping</td><td>Loss of body motion to waves it generates.</td></tr><tr><td>Added mass</td><td>Extra inertia from water moving with the body, without extra gravitational weight.</td></tr><tr><td>WPO</td><td>World Position Offset: material displacement of rendered vertices.</td></tr><tr><td>Own field</td><td>Local simulation of one body's wave contribution, removed from its delayed feedback.</td></tr></tbody></table>
+<p class="meta noprint">Prepared for users of the modified FluidNinja core and FluidNinja Buoyancy plugin. Calculations are reference models; measured setup, collision geometry, source revision, and test results remain the authority for a particular asset.</p>
+</section>

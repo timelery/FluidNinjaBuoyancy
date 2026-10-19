@@ -1,0 +1,152 @@
+[
+  {
+    "id": "S1",
+    "title": "Shared buoyancy component",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancyComponent.h",
+    "sha256": "5e2ace475b836f9fc7ccc1543e571daea3c6b4d14d2564b60e665be17a4b037d"
+  },
+  {
+    "id": "S2",
+    "title": "Hull construction and hydrodynamic integration",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyCore.cpp",
+    "sha256": "1a3a382569f904e088f62103f6f70b1b31a47d0e86991a1c1c57e2470f4d6738"
+  },
+  {
+    "id": "S3",
+    "title": "Physics callback and stable steps",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyCallback.cpp",
+    "sha256": "a92120b8bcf5f1209f6d78011e2311c2c1ffe36b318004fd6f6c75a4e1815819"
+  },
+  {
+    "id": "S4",
+    "title": "Surface capture and runtime orchestration",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancySubsystem.cpp",
+    "sha256": "e22c9c0079cee6aff27d8c16bae179259b977c897c78942df07e97180fdb7177"
+  },
+  {
+    "id": "S5",
+    "title": "Global settings and wave controls",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancySettings.h",
+    "sha256": "f8b7aecaa71225e2afd81f53eff30f31386f36282006266bd3cd6c9a82b73617"
+  },
+  {
+    "id": "S6",
+    "title": "Wave coupling and self fields",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaves.cpp",
+    "sha256": "0240a083c868e4f3413476dad43d4b0b488d9969e2cfcdd5982ec1f62d26dbf7"
+  },
+  {
+    "id": "S7",
+    "title": "Wave step shader",
+    "path": "Tools/CorePatch/FluidNinjaWaves/Ninja_WaveStep.hlsl",
+    "sha256": "7a31087936ba25dd999aeaece7c663ed265bfda6ded71901981d04813fa88661"
+  },
+  {
+    "id": "S8",
+    "title": "Wave export shader",
+    "path": "Tools/CorePatch/FluidNinjaWaves/Ninja_WaveExport.hlsl",
+    "sha256": "36434f88510fc82365510b7d7a97f1752c7daca27bbe358fdd2cb2253ebd4b81"
+  },
+  {
+    "id": "S9",
+    "title": "Core patch tooling",
+    "path": "Tools/CorePatch/apply_fluidninja_waves.py",
+    "sha256": "f2b927292ef6d6385496657f6949a736ee587a8861d5a1b52b7152e9475a0217"
+  },
+  {
+    "id": "S10",
+    "title": "Relative tracking design",
+    "path": "Docs/RelativeTrackingProposal.md",
+    "sha256": "27e9a3247295a0a4ca079121e10deaaa21af5b8285450d03df27226e05bef1c4"
+  },
+  {
+    "id": "S11",
+    "title": "Preset definitions",
+    "path": "Tools/make_presets.py",
+    "sha256": "02342ff81bb0e1173b6d0ae0a751e1c57fc7651d685cd0d5c4cd0675241bcded"
+  },
+  {
+    "id": "S12",
+    "title": "Preset application",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyPresetLibrary.cpp",
+    "sha256": "f7e2f995adc083a78c55ced6217289af0cf7ab0917751b0248267ed41bea7cfc"
+  },
+  {
+    "id": "S13",
+    "title": "Unified water query",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancyWaterQuery.h",
+    "sha256": "9c7c875d3fdde3d63682319c1ec90ebce3baa8f7db095b9ee866a9627b1c8733"
+  },
+  {
+    "id": "S14",
+    "title": "Per simulation wave settings",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaWaveSimComponent.h",
+    "sha256": "b96ce879ab22fd0610072965c739880d9e4a9c828ba8f813286ad183ad8f92ed"
+  },
+  {
+    "id": "S15",
+    "title": "Source gather shader",
+    "path": "Shaders/Private/FluidNinjaBuoyancyGather.usf",
+    "sha256": "cf30770e53677815f92e242fbf9a85b7521531bd8ba3e219ff9bbd69928dad66"
+  },
+  {
+    "id": "S16",
+    "title": "Wave source and self field shader",
+    "path": "Shaders/Private/FluidNinjaBuoyancyWaveSource.usf",
+    "sha256": "e73003f0c461230007154294ca633addef6e679405f07d9b8ae7f5bee67ac134"
+  },
+  {
+    "id": "S17",
+    "title": "Preset data asset schema",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancyPreset.h",
+    "sha256": "271c3a2772d9412968afea9d0f88a2ce4417deea17e4623c141c2aafae107123"
+  },
+  {
+    "id": "S18",
+    "title": "Component setup and effects",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyComponent.cpp",
+    "sha256": "eb2786406f7d02f485111aa7a12cb3ac89cd1bd9c9a95e5c3c49d1ce802d475f"
+  },
+  {
+    "id": "S19",
+    "title": "Quality tier configuration",
+    "path": "Config/DefaultFluidNinjaBuoyancy.ini",
+    "sha256": "8114da60dd272aceab970b28e2bc8dac156106cf23d83b43df3f9a1dde745db1"
+  },
+  {
+    "id": "S20",
+    "title": "Developer test bench",
+    "path": "Source/FluidNinjaBuoyancyDeveloper/Private/FluidNinjaBuoyancyTestBench.cpp",
+    "sha256": "3d75abbe9f9eb75f10542ae723f37587d389b775758993a278c7de3fff5f1580"
+  },
+  {
+    "id": "S21",
+    "title": "Public subsystem and integration API",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancySubsystem.h",
+    "sha256": "6a171cb4cc82183fab61c9ce2688b6a53e2230d82c1e3f4cbaf3f2719db9fa7f"
+  },
+  {
+    "id": "S22",
+    "title": "Swimmer component API",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancySwimmerComponent.h",
+    "sha256": "828fc8697a62fc5f5185aca93d531a5e77bff424669bfa426b826a592e0db6b2"
+  },
+  {
+    "id": "S23",
+    "title": "Module registration and settings constructor",
+    "path": "Source/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyModule.cpp",
+    "sha256": "05cff1d316dcf64bdd047d0c35f4d19f07bbcf50ff05ea10a806c03f690adb1f"
+  },
+  {
+    "id": "S24",
+    "title": "Swimmer movement adapter interface",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancySwimmerProvider.h",
+    "sha256": "2a372ad5dcbcb1713dcfd2f152e622d42e58d5f00c48a1ab9613788eb455b093"
+  },
+  {
+    "id": "S25",
+    "title": "Swimmer skeleton and contact profile",
+    "path": "Source/FluidNinjaBuoyancy/Public/FluidNinjaBuoyancySwimmerProfile.h",
+    "sha256": "caebc97cf673c18dc476f5fe029bc0215c7a4a439ff91093687029105930f235"
+  }
+]
