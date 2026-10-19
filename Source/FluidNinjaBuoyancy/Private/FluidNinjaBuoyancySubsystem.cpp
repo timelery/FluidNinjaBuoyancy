@@ -3301,8 +3301,12 @@ int32 UFluidNinjaBuoyancySubsystem::CopyFootprints(const TArray<FFootprint>& Wan
 			Data->Height.EnqueueCopy(RHICmdList, Source, FIntVector(Data->HeightMin.X, Data->HeightMin.Y, 0), 0, FIntVector(Data->HeightSize.X, Data->HeightSize.Y, 1));
 			if (Data->bFlow)
 			{
+				// FluidNinja's velocity buffer can still be its 1 x 1 placeholder on the GPU while its SizeX already says the full
+				// size (a simulation that starts with play): copy only a block that lies inside the texture as it is now.
 				FRHITexture* FlowSource = FlowResource ? FlowResource->GetRenderTargetTexture() : nullptr;
-				if (FlowSource)
+				const FIntVector FlowExtent = FlowSource ? FlowSource->GetSizeXYZ() : FIntVector::ZeroValue;
+				if (FlowSource && Data->FlowMin.X >= 0 && Data->FlowMin.Y >= 0 && Data->FlowMin.X + Data->FlowSize.X <= FlowExtent.X
+					&& Data->FlowMin.Y + Data->FlowSize.Y <= FlowExtent.Y)
 				{
 					Data->Flow.EnqueueCopy(RHICmdList, FlowSource, FIntVector(Data->FlowMin.X, Data->FlowMin.Y, 0), 0, FIntVector(Data->FlowSize.X, Data->FlowSize.Y, 1));
 				}
@@ -4208,8 +4212,11 @@ void UFluidNinjaBuoyancySubsystem::UpdateFlowProbe()
 		ENQUEUE_RENDER_COMMAND(FluidNinjaBuoyancyProbeCopy)([Hold = FlowProbe, Index, Resource](FRHICommandListImmediate& RHICmdList)
 		{
 			FFluidNinjaBuoyancyFlowProbe::FShot& Shot = Hold->Shot[Index];
+			// As the gather: FluidNinja's buffer may still be its 1 x 1 placeholder on the GPU.
 			FRHITexture* Source = Resource ? Resource->GetRenderTargetTexture() : nullptr;
-			if (!Source)
+			const FIntVector Extent = Source ? Source->GetSizeXYZ() : FIntVector::ZeroValue;
+			if (!Source || Hold->Min.X < 0 || Hold->Min.Y < 0 || Hold->Min.X + FFluidNinjaBuoyancyFlowProbe::Side > Extent.X
+				|| Hold->Min.Y + FFluidNinjaBuoyancyFlowProbe::Side > Extent.Y)
 			{
 				Shot.Stage = -1;
 				return;

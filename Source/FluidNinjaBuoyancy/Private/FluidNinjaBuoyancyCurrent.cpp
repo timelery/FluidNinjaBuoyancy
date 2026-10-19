@@ -409,15 +409,23 @@ int32 UFluidNinjaBuoyancySubsystem::RequestCurrent(const FVector2D& Location, fl
 	Data->Stage = 1;
 	ENQUEUE_RENDER_COMMAND(FluidNinjaBuoyancyCurrentCopy)([Data, Resource, PressureResource](FRHICommandListImmediate& RHICmdList)
 	{
+		// The GPU texture's own size: FluidNinja's buffers start as 1 x 1 placeholders, and the render target's SizeX can already say
+		// the full size while the texture behind it is still the placeholder (a simulation that starts with play). A copy past its edge
+		// is a fatal D3D12 assertion, so the square must lie inside the texture as it is now; else this copy waits for a later frame.
+		const auto Holds = [](FRHITexture* Source, const FIntPoint& Min, int32 Side)
+		{
+			const FIntVector Size = Source ? Source->GetSizeXYZ() : FIntVector::ZeroValue;
+			return Source && Min.X >= 0 && Min.Y >= 0 && Min.X + Side <= Size.X && Min.Y + Side <= Size.Y;
+		};
 		FRHITexture* Texture = Resource ? Resource->GetRenderTargetTexture() : nullptr;
-		if (!Texture)
+		if (!Holds(Texture, Data->Min, Data->Side))
 		{
 			Data->Stage = 0;
 			return;
 		}
 		Data->Readback.EnqueueCopy(RHICmdList, Texture, FIntVector(Data->Min.X, Data->Min.Y, 0), 0, FIntVector(Data->Side, Data->Side, 1));
 		FRHITexture* PressureTexture = Data->bPressure && PressureResource ? PressureResource->GetRenderTargetTexture() : nullptr;
-		if (PressureTexture)
+		if (PressureTexture && Holds(PressureTexture, Data->PressureMin, Data->PressureSide))
 		{
 			Data->PressureReadback.EnqueueCopy(RHICmdList, PressureTexture, FIntVector(Data->PressureMin.X, Data->PressureMin.Y, 0), 0,
 				FIntVector(Data->PressureSide, Data->PressureSide, 1));
