@@ -4875,12 +4875,52 @@ void UFluidNinjaBuoyancySubsystem::TickWaves(float DeltaSeconds, bool bIdle)
 		}
 	}
 
-	// Registered swimmers' head, chest and hips (FFluidNinjaBuoyancySwimmers, ticked before this): spheres pushing the water aside.
+	// Registered humanoid pawns opt into the player's body. Mesh-only divers and animals retain their profile's bone spheres.
 	if (Swimmers)
 	{
+		TSet<const USkeletalMeshComponent*> PawnBodyMeshes;
+		TSet<const APawn*> PawnBodies;
+		if (Input.Swimmer.bValid)
+		{
+			PawnBodies.Add(Pawn);
+		}
+		TArray<TPair<USkeletalMeshComponent*, FFluidNinjaSwimmerSource>> Registered;
+		Swimmers->GetRegistered(Registered);
 		Input.Puppets.Reserve(Swimmers->GetSpheres().Num());
+		for (const TPair<USkeletalMeshComponent*, FFluidNinjaSwimmerSource>& Entry : Registered)
+		{
+			APawn* RegisteredPawn = Entry.Value.bUsePawnBody ? Cast<APawn>(Entry.Key->GetOwner()) : nullptr;
+			const UCapsuleComponent* RegisteredCapsule = RegisteredPawn ? Cast<UCapsuleComponent>(RegisteredPawn->GetRootComponent()) : nullptr;
+			if (!RegisteredCapsule)
+			{
+				continue;
+			}
+			PawnBodyMeshes.Add(Entry.Key);
+			FFluidNinjaSwimmerPose Pose;
+			if (!Entry.Value.bDisplacement || !RegisteredCapsule->IsCollisionEnabled() || PawnBodies.Contains(RegisteredPawn)
+				|| !Swimmers->GetPose(Entry.Key, Pose))
+			{
+				continue;
+			}
+			PawnBodies.Add(RegisteredPawn);
+			FFluidNinjaWaveSwimmerInput& Body = Input.Puppets.AddDefaulted_GetRef();
+			Body.bValid = true;
+			Body.Pawn = RegisteredPawn;
+			Body.Source = Entry.Key;
+			Body.Part = INDEX_NONE;
+			Body.Centre = RegisteredCapsule->GetComponentLocation();
+			Body.Radius = RegisteredCapsule->GetScaledCapsuleRadius();
+			Body.HalfHeight = RegisteredCapsule->GetScaledCapsuleHalfHeight();
+			Body.Velocity = RegisteredPawn->GetVelocity();
+			Body.WaterZ = Entry.Value.WaterZ;
+			Body.bHasWaterZ = true;
+		}
 		for (const FFluidNinjaSwimmerSphere& Sphere : Swimmers->GetSpheres())
 		{
+			if (PawnBodyMeshes.Contains(Sphere.Mesh.Get()))
+			{
+				continue;
+			}
 			FFluidNinjaWaveSwimmerInput& Puppet = Input.Puppets.AddDefaulted_GetRef();
 			Puppet.bValid = true;
 			Puppet.Source = Sphere.Mesh.Get();

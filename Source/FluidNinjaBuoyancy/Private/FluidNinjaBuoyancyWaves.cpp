@@ -17,6 +17,7 @@
 #include "FluidNinjaBuoyancySettings.h"
 #include "FluidNinjaBuoyancyStats.h"
 #include "FluidNinjaBuoyancySubsystem.h"
+#include "FluidNinjaBuoyancySwimmerBody.h"
 #include "FluidNinjaWaveSimComponent.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -3137,7 +3138,29 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		}
 	}
 
-	// The swimmer: the local player's capsule, upright, in the simulation around it. It is measured against the Surface Mirror where that
+	// Player and registered humanoid pawns use this one shape calculation. Animated head/chest/hips spheres concentrate their volume
+	// into small, bobbing columns and produced much taller crests than the player's tapered body during the same freestyle stroke.
+	auto PawnBodyBounds = [](const FFluidNinjaWaveSwimmerInput& Body)
+	{
+		const double HalfLength = FMath::Max(0.95 * static_cast<double>(Body.HalfHeight), 1.0);
+		return FBox2D(FVector2D(Body.Centre) - FVector2D(HalfLength), FVector2D(Body.Centre) + FVector2D(HalfLength));
+	};
+	auto PlacePawnBody = [&Settings](const FFluidNinjaWaveSwimmerInput& Body, FPlaced& Place)
+	{
+		const APawn* BodyPawn = Body.Pawn.Get();
+		Place.Transform = FTransform(FRotator(0.0, BodyPawn ? BodyPawn->GetActorRotation().Yaw : 0.0, 0.0), Body.Centre);
+		Place.WaterZ = Body.bHasWaterZ ? Body.WaterZ : WaveNoWaterZ;
+		const double WaterZ = Body.bHasWaterZ ? static_cast<double>(Body.WaterZ) : Body.Centre.Z + Body.HalfHeight;
+		const FFluidNinjaSwimmerBodyShape Shape = FFluidNinjaSwimmerBodyShape::Make(Body.Radius, Body.HalfHeight, Body.Centre.Z, WaterZ, Settings.SwimmerVolumeLitres);
+		Place.Record.Kind = 2;
+		Place.Record.Extra = FVector4f(static_cast<float>(Shape.HalfLength), static_cast<float>(Shape.HalfWidth), Place.WaterZ, Shape.WetScale);
+		Place.Record.HalfThicknessCm = static_cast<float>(Shape.HalfThickness);
+		Place.Record.SubmergeFadeCm = WaveSwimmerSubmergeFadeCm;
+		Place.Record.SpeedCmS = static_cast<float>(FVector2D(Body.Velocity).Size());
+		return Shape.WetScale;
+	};
+
+	// The swimmer: the local player's capsule reference, in the simulation around it. It is measured against the Surface Mirror where that
 	// shows water under it, else the water the swim found this frame; with neither (on land) it has no static head. It has no own field
 	// (nothing floats it on the waves).
 	const APawn* SwimmingPawn = Input.Swimmer.Pawn.Get();
@@ -3152,12 +3175,7 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		// along the water: the upright capsule packed the body's 76 L into a 70 cm disc, 20 cm deep with a vertical wall at its rim, and a
 		// moving swimmer threw waves far too tall and spikes; the ellipsoid spreads the same volume over its length, deepest along its centre
 		// line, and tapers to nothing at its rim. (At 76 L: semi-axes 85 x 23 cm and 9.4 cm thick each way.)
-		const double SwimHalfLength = FMath::Max(0.95 * static_cast<double>(Input.Swimmer.HalfHeight), 1.0);
-		const double SwimHalfWidth = FMath::Max(0.65 * static_cast<double>(Input.Swimmer.Radius), 1.0);
-		const double SwimBodyCm3 = FMath::Max(static_cast<double>(Settings.SwimmerVolumeLitres), 0.0) * 1000.0;
-		const double SwimHalfThickness = SwimBodyCm3 / (4.0 / 3.0 * UE_DOUBLE_PI * SwimHalfLength * SwimHalfWidth);
-		const double SwimYaw = SwimmingPawn ? SwimmingPawn->GetActorRotation().Yaw : 0.0;
-		const FBox2D SwimmerBox(FVector2D(Input.Swimmer.Centre) - FVector2D(SwimHalfLength), FVector2D(Input.Swimmer.Centre) + FVector2D(SwimHalfLength));
+		const FBox2D SwimmerBox = PawnBodyBounds(Input.Swimmer);
 		const EFluidNinjaWaveWater SwimmerWater = Input.Swimmer.bHasWaterZ ? EFluidNinjaWaveWater::Published : EFluidNinjaWaveWater::None;
 		const bool bReset = !bSwimmerTracked || SwimmerPawn.Get() != SwimmingPawn || Swimmer.Water != SwimmerWater || Swimmer.Sim != SwimmerSim->Key
 			|| SwimmerSim->bRestart || Jumped(Swimmer, Input.Swimmer.Centre, FQuat::Identity, Input.Swimmer.Velocity, FVector::ZeroVector, DeltaSeconds);
@@ -3175,28 +3193,12 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		FPlaced& Place = Placed.AddDefaulted_GetRef();
 		Place.Sim = static_cast<int32>(SwimmerSim - Sims.GetData());
 		Place.bRecord = true;
-		Place.Transform = FTransform(FRotator(0.0, SwimYaw, 0.0), Input.Swimmer.Centre);
 		Place.Bounds = SwimmerBox;
-		Place.WaterZ = Input.Swimmer.bHasWaterZ ? Input.Swimmer.WaterZ : WaveNoWaterZ;
-		// The ellipsoid holds the body's volume itself and presses only what of it is under the surface, so it needs no scaling to the body.
-		const double CapsuleWaterZ = Input.Swimmer.bHasWaterZ ? static_cast<double>(Input.Swimmer.WaterZ) : Input.Swimmer.Centre.Z + Input.Swimmer.HalfHeight;
-		SwimmerScale = 1.f;
 		// Wading, the body is not afloat: its legs displace a few litres, not the capsule's 70 cm column, and in a current the core carries
 		// that column's hollow away while its head stays, so a wader stood in a glassy bell of P over the water. The head comes in only as
 		// the water reaches the chest (75 % of the capsule's height, full from there up: swimming), from nothing at the waist (50 %); the
 		// wading wakes at the feet draw the wader's disturbance.
-		const double Height = FMath::Max(2.0 * Input.Swimmer.HalfHeight, 1.0);
-		const double Wet = (CapsuleWaterZ - (Input.Swimmer.Centre.Z - Input.Swimmer.HalfHeight)) / Height;
-		SwimmerScale *= static_cast<float>(FMath::SmoothStep(0.5, 0.75, Wet));
-		Place.Record.Kind = 2;
-		Place.Record.Extra = FVector4f(static_cast<float>(SwimHalfLength), static_cast<float>(SwimHalfWidth), Place.WaterZ, SwimmerScale);
-		Place.Record.HalfThicknessCm = static_cast<float>(SwimHalfThickness);
-		// Under the surface the body presses only its own submerged thickness, and lets that go as its top goes well down (the swimmer
-		// wakes' surface reach), a dive.
-		Place.Record.SubmergeFadeCm = WaveSwimmerSubmergeFadeCm;
-		// Its speed for the foam's waterline shear (no current is read here: the swim code carries the swimmer with it, so the ground
-		// speed is close to the speed through the water everywhere but a fast river).
-		Place.Record.SpeedCmS = static_cast<float>(FVector2D(Input.Swimmer.Velocity).Size());
+		SwimmerScale = PlacePawnBody(Input.Swimmer, Place);
 		Swimmer.Bounds = SwimmerBox;
 		Swimmer.Location = Input.Swimmer.Centre;
 		Swimmer.Velocity = Input.Swimmer.Velocity;
@@ -3219,8 +3221,7 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		SwimmerPawn.Reset();
 	}
 
-	// Registered swimmers (an AI swimmer or diver, say): each sphere of their head, chest and hips pushes the water aside like
-	// the player's capsule, at its full volume, measured against the still water they were registered on.
+	// Registered swimmers: opted-in humanoid pawns match the player; other swimmers retain their profile's individual spheres.
 	TSet<TPair<FObjectKey, int32>> PuppetsSeen;
 	int32 PuppetsSent = 0;
 	for (const FFluidNinjaWaveSwimmerInput& Puppet : Input.Puppets)
@@ -3239,7 +3240,9 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		{
 			State = &Puppets.Add(Key);
 		}
-		const FBox2D PuppetBox(FVector2D(Puppet.Centre) - FVector2D(Puppet.Radius), FVector2D(Puppet.Centre) + FVector2D(Puppet.Radius));
+		const bool bPawnBody = Puppet.Pawn.IsValid();
+		const FBox2D PuppetBox = bPawnBody ? PawnBodyBounds(Puppet)
+			: FBox2D(FVector2D(Puppet.Centre) - FVector2D(Puppet.Radius), FVector2D(Puppet.Centre) + FVector2D(Puppet.Radius));
 		if (bNew || State->Sim != PuppetSim->Key || PuppetSim->bRestart || Jumped(*State, Puppet.Centre, FQuat::Identity, Puppet.Velocity, FVector::ZeroVector, DeltaSeconds))
 		{
 			if (!bNew && State->Bounds.bIsValid)
@@ -3254,12 +3257,19 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		FPlaced& Place = Placed.AddDefaulted_GetRef();
 		Place.Sim = static_cast<int32>(PuppetSim - Sims.GetData());
 		Place.bRecord = true;
-		Place.Transform = FTransform(Puppet.Centre);
 		Place.Bounds = PuppetBox;
-		Place.WaterZ = Puppet.bHasWaterZ ? Puppet.WaterZ : WaveNoWaterZ;
-		Place.Record.Kind = 1;
-		Place.Record.Extra = FVector4f(Puppet.Radius, Puppet.HalfHeight, Place.WaterZ, 1.f);
-		Place.Record.SpeedCmS = static_cast<float>(FVector2D(Puppet.Velocity).Size());
+		if (bPawnBody)
+		{
+			PlacePawnBody(Puppet, Place);
+		}
+		else
+		{
+			Place.Transform = FTransform(Puppet.Centre);
+			Place.WaterZ = Puppet.bHasWaterZ ? Puppet.WaterZ : WaveNoWaterZ;
+			Place.Record.Kind = 1;
+			Place.Record.Extra = FVector4f(Puppet.Radius, Puppet.HalfHeight, Place.WaterZ, 1.f);
+			Place.Record.SpeedCmS = static_cast<float>(FVector2D(Puppet.Velocity).Size());
+		}
 		State->Bounds = PuppetBox;
 		State->Location = Puppet.Centre;
 		State->Velocity = Puppet.Velocity;
@@ -3709,7 +3719,7 @@ void UFluidNinjaBuoyancyWaves::BuildStatusLine(int32 NumBodies, int32 Resets, in
 		NumBodies, Resets, Leaving, Fields, Felt, AtlasSize, NumImpulses, Written, MegaBytes,
 		UnhiddenSurfaces > 0 ? *FString::Printf(TEXT(", ERROR: %d captured surface%s could not hide their waves from the Surface Mirror (see the log)"), UnhiddenSurfaces, UnhiddenSurfaces == 1 ? TEXT("") : TEXT("s")) : TEXT(""),
 		*(FString(bSwimmerSent ? *FString::Printf(TEXT(", swimmer (static head x%.2f)"), SwimmerScale) : TEXT(""))
-			+ (PuppetsSent > 0 ? FString::Printf(TEXT(", %d registered swimmer sphere%s"), PuppetsSent, PuppetsSent == 1 ? TEXT("") : TEXT("s")) : FString())
+			+ (PuppetsSent > 0 ? FString::Printf(TEXT(", %d registered swimmer source%s"), PuppetsSent, PuppetsSent == 1 ? TEXT("") : TEXT("s")) : FString())
 			+ (DeepHeadsSent > 0 ? FString::Printf(TEXT(", %d deep volume head%s (sinkers and fading ones, fnb.Waves.PlungeSource)"), DeepHeadsSent, DeepHeadsSent == 1 ? TEXT("") : TEXT("s")) : FString())),
 		bDisplacement ? TEXT("") : TEXT(", static head off"), IsImpulseOn() ? TEXT("") : TEXT(", impulses off"),
 		SimText.IsEmpty() ? TEXT("; no FluidNinja simulation") : *SimText);

@@ -1,9 +1,11 @@
 #include "FluidNinjaBuoyancySwimmers.h"
 
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 #include "FluidNinjaBuoyancyLog.h"
 #include "FluidNinjaBuoyancySettings.h"
+#include "FluidNinjaBuoyancySwimmerBody.h"
 #include "GameFramework/Pawn.h"
 #include "NiagaraDataChannelAccessor.h"
 #include "NiagaraDataChannelAsset.h"
@@ -397,6 +399,9 @@ void FFluidNinjaBuoyancySwimmers::Tick(float DeltaSeconds, const FFluidNinjaSwim
 		Shown = nullptr;
 	}
 	Player.Pose.bValid = false;
+	Player.Stats.DisplacedLitres = 0.f;
+	Player.Stats.bUsesPawnBody = false;
+	Player.Stats.ContactPartCount = 0;
 	if (Player.Mesh.Get() != Shown || !Shown)
 	{
 		if (Shown && Player.Mesh.Get() != Shown)
@@ -422,6 +427,7 @@ void FFluidNinjaBuoyancySwimmers::Tick(float DeltaSeconds, const FFluidNinjaSwim
 		// The player's pawn: hands, elbows, feet and head only (its chest and hips ride its capsule).
 		Player.Pose = *PlayerPose;
 		UFluidNinjaSwimmerProviderLibrary::FilterParts(Player.Pose, false);
+		Player.Stats.ContactPartCount = Player.Pose.Parts.Num();
 		// Its live water, for GetWater (the caller's PlayerWaterZ stays the surface its parts meet).
 		FFluidNinjaWaterSample Sample;
 		if (System->SampleWater(Player.Pose.bHasSpheres && Player.Pose.HipsRadiusCm > 0.f ? Player.Pose.Hips : Player.Pose.Location, Sample))
@@ -434,6 +440,14 @@ void FFluidNinjaBuoyancySwimmers::Tick(float DeltaSeconds, const FFluidNinjaSwim
 		TickSwimmer(Player, Player.Pose, PlayerWaterZ, DeltaSeconds, Now);
 		TickDive(Player, Player.Pose, PlayerWaterZ, DeltaSeconds);
 		TickStroke(Player, Player.Pose, Player.bHasWater && Player.Water.bWater ? Player.Water.StillZ : PlayerWaterZ, DeltaSeconds);
+		const APawn* Pawn = Cast<APawn>(Shown->GetOwner());
+		const UCapsuleComponent* Capsule = Pawn ? Cast<UCapsuleComponent>(Pawn->GetRootComponent()) : nullptr;
+		if (Capsule && Capsule->IsCollisionEnabled())
+		{
+			Player.Stats.bUsesPawnBody = true;
+			Player.Stats.DisplacedLitres = FFluidNinjaSwimmerBodyShape::Make(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight(),
+				Capsule->GetComponentLocation().Z, PlayerWaterZ, Settings.SwimmerVolumeLitres).DisplacedLitres;
+		}
 	}
 
 	for (FSwimmer& Swimmer : Registered)
@@ -455,9 +469,12 @@ void FFluidNinjaBuoyancySwimmers::Tick(float DeltaSeconds, const FFluidNinjaSwim
 			Swimmer.bChestKnown = false;
 			Swimmer.Pose.bValid = false;
 			Swimmer.Stats.DisplacedLitres = 0.f;
+			Swimmer.Stats.bUsesPawnBody = false;
+			Swimmer.Stats.ContactPartCount = 0;
 			continue;
 		}
 		UFluidNinjaSwimmerProviderLibrary::FilterParts(Swimmer.Pose, Swimmer.Source.bWholeBody);
+		Swimmer.Stats.ContactPartCount = Swimmer.Source.bPartContacts && Settings.bSwimmerContacts ? Swimmer.Pose.Parts.Num() : 0;
 		float WaterZ = 0.f;
 		float StillZ = 0.f;
 		WaterFor(Swimmer, Swimmer.Pose, DeltaSeconds, WaterZ, StillZ);
@@ -502,6 +519,15 @@ void FFluidNinjaBuoyancySwimmers::Tick(float DeltaSeconds, const FFluidNinjaSwim
 		}
 		Swimmer.bHasSpheres = true;
 		Swimmer.Stats.DisplacedLitres = Swimmer.Source.bDisplacement ? static_cast<float>(Below / 1000.0) : 0.f;
+		const APawn* Pawn = Swimmer.Source.bUsePawnBody ? Cast<APawn>(Mesh->GetOwner()) : nullptr;
+		const UCapsuleComponent* Capsule = Pawn ? Cast<UCapsuleComponent>(Pawn->GetRootComponent()) : nullptr;
+		Swimmer.Stats.bUsesPawnBody = Capsule != nullptr;
+		if (Capsule)
+		{
+			Swimmer.Stats.DisplacedLitres = Swimmer.Source.bDisplacement && Capsule->IsCollisionEnabled()
+				? FFluidNinjaSwimmerBodyShape::Make(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight(),
+					Capsule->GetComponentLocation().Z, StillZ, Settings.SwimmerVolumeLitres).DisplacedLitres : 0.f;
+		}
 	}
 
 	WriteStrokePoints();

@@ -70,7 +70,7 @@ struct FFluidNinjaWaveBodyInput
 	int32 Sim = INDEX_NONE;
 };
 
-/** The local player's pawn, an upright capsule pushing the water aside; or a sphere of a registered swimmer's body (Source, Part). */
+/** A pawn's smooth swimming body, or a sphere of a registered swimmer's body (Source, Part). */
 struct FFluidNinjaWaveSwimmerInput
 {
 	bool bValid = false;
@@ -116,7 +116,7 @@ struct FFluidNinjaWaveWorldInput
 	bool bControlled = false;
 	float ControlledHeight = 0.f;
 	FFluidNinjaWaveSwimmerInput Swimmer;
-	/** Registered swimmers' spheres (head, chest, hips), each pushing the water aside at its full volume. */
+	/** Registered swimmers' spheres, or one player-shaped body for an opted-in humanoid pawn (Pawn valid). */
 	TArray<FFluidNinjaWaveSwimmerInput> Puppets;
 	TArray<FFluidNinjaWaveBodyImpulses> Impulses;
 	FVector Camera = FVector::ZeroVector;

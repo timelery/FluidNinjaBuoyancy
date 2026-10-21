@@ -115,6 +115,11 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaSwimmerSource
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Swimmer")
 	bool bDisplacement = true;
 
+	/** A humanoid pawn uses the player's smooth, lying body and project Swimmer Volume Litres instead of three animated bone spheres.
+	 * Requires a capsule root; ignored for mesh-only swimmers. Keep off for animal profiles. Default off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Swimmer")
+	bool bUsePawnBody = false;
+
 	/** Its hands, forearms, feet and head splash where they go into the water and press rings into it; its feet churn it. Off: no part
 	 * splashes, rings or entry stats. Needs the project's Swimmer Contacts setting (the rings also need Waves). Default on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Swimmer")
@@ -167,11 +172,19 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaSwimmerStats
 	UPROPERTY(BlueprintReadOnly, Category = "Swimmer")
 	double LastEntryTime = -1.0;
 
-	/** The water its head, chest and hips push aside now, litres (below the still water). Registered swimmers with Displacement only; 0 for
-	 * the player's pawn, without displacement, or while the swimmer is hidden or out of the water.
+	/** The body's water volume below the still surface, litres: its bone spheres or the player's tapered body with its wading fade.
+	 * 0 without displacement, or while the swimmer is hidden or out of the water. Before the rendering's deep-water fade.
 	  * Read-only: 0 or more. */
 	UPROPERTY(BlueprintReadOnly, Category = "Swimmer")
 	float DisplacedLitres = 0.f;
+
+	/** The current pose uses the player's capsule-referenced, tapered displacement body rather than bone spheres. */
+	UPROPERTY(BlueprintReadOnly, Category = "Swimmer")
+	bool bUsesPawnBody = false;
+
+	/** Body parts enabled for contact impulses in this pose (Manny/Quinn: 7 for the player profile, 11 for Whole Body). */
+	UPROPERTY(BlueprintReadOnly, Category = "Swimmer")
+	int32 ContactPartCount = 0;
 
 	/** The parts that went in during the current burst: a burst starts with the first entry after half a second with every part out of the
 	 * water (a dive, a jump). 0 or more. */
