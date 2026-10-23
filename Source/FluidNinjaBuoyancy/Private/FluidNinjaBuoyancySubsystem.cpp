@@ -4718,6 +4718,11 @@ UFluidNinjaBuoyancyWaves* UFluidNinjaBuoyancySubsystem::GetWaves() const
 
 void UFluidNinjaBuoyancySubsystem::TickWaves(float DeltaSeconds, bool bIdle)
 {
+	// Wave Follow, on every way out: after the waves' frame, and with the Surface Mirror's WaveHeightScale put back.
+	ON_SCOPE_EXIT
+	{
+		UpdateWaveFollow();
+	};
 	UWorld* World = GetWorld();
 	if (!Waves || !World)
 	{

@@ -606,6 +606,9 @@ protected:
 	/** The source whose surface lies under Point (the smallest where they overlap), else whose square holds it; INDEX_NONE if none. */
 	int32 FindFlowSource(const FVector2D& Point) const;
 	const FFlowSource* FindFlowSourceFor(const UTextureRenderTarget2D* Buffer) const;
+	/** Wave Follow (FluidNinjaBuoyancyWaveFollow.cpp): the wave height of the simulation under the view copied into the Wave Follow Target
+	 * and its square published in the Wave Follow Collection, for MF_FNB_WaveFollow; at the end of every waves' frame. */
+	void UpdateWaveFollow();
 	void DrawDebug();
 	FSlot* FindSlot(int32 Id);
 	void UpdateLevelAndSleep(FSlot& Slot, const FVector& Camera, float DeltaSeconds);
@@ -690,6 +693,16 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialParameterCollection> NinjaCollection;
+
+	/** Wave Follow's render target and parameter collection (the settings' Wave Follow Target and Collection), loaded once. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureRenderTarget2D> WaveFollowTarget;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialParameterCollection> WaveFollowCollection;
+	bool bWaveFollowLoaded = false;
+	/** The pressure buffer Wave Follow copied last frame (null: the window published invalid). */
+	TWeakObjectPtr<UTextureRenderTarget2D> WaveFollowSource;
+	bool bWaveFollowPublished = false;
 
 	/** FluidNinja's global point input, where the wakes go. */
 	UPROPERTY(Transient)

@@ -557,6 +557,39 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Waves")
 	FName PressureBufferParameter = TEXT("PressureDivergenceBuffer");
 
+	/** Wave Follow: every frame the drawn wave height under the view (the pressure buffer's B, η + P, of the simulation under the camera,
+	 * else of the nearest one) is copied into Wave Follow Target and its square published in Wave Follow Collection, so a material can move
+	 * with the waves: MF_FNB_WaveFollow (Content/Materials) lifts each vertex by the waves' height where it stands. Floating plants, leaves
+	 * and litter placed as plain meshes or foliage instances then bob and tilt with wakes, ripples and the wind sea without being buoyancy
+	 * bodies. They follow FluidNinja Waves only (FluidNinja's own mesh distortion, a few cm, is not copied) and on one simulation at a time;
+	 * on any other, outside its square, and in the editor they stand still. Costs one GPU copy of the pressure buffer a frame (8 MB at 1024
+	 * cells). Default on. Off: the materials stand still. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves"))
+	bool bWaveFollow = true;
+
+	/** The render target Wave Follow copies the wave height into, which MF_FNB_WaveFollow samples. It takes the pressure buffer's size and
+	 * format (RGBA16F) when the followed simulation changes; a stock core's RG16F buffer carries no wave height and is not copied. Default
+	 * the plugin's RT_FNB_WaveFollow: a material that follows the waves must sample the same target. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveFollow", AllowedClasses = "/Script/Engine.TextureRenderTarget2D"))
+	FSoftObjectPath WaveFollowTarget = FSoftObjectPath(TEXT("/FluidNinjaBuoyancy/Materials/RT_FNB_WaveFollow.RT_FNB_WaveFollow"));
+
+	/** The parameter collection Wave Follow publishes in, which MF_FNB_WaveFollow reads: Window (the copied square's centre X and Y and its
+	 * size, in cm, and W 1 while the copy is valid, else 0: the materials stand still) and Shape (the surface's WaveHeightScale, Wave Follow
+	 * Max Height Cm, Wave Follow Edge Fade Cm). Default the plugin's MPC_FNB_WaveFollow. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveFollow", AllowedClasses = "/Script/Engine.MaterialParameterCollection"))
+	FSoftObjectPath WaveFollowCollection = FSoftObjectPath(TEXT("/FluidNinjaBuoyancy/Materials/MPC_FNB_WaveFollow.MPC_FNB_WaveFollow"));
+
+	/** How far in from the edge of the followed simulation's square the following eases from full to none, so floating things there do not
+	 * step where the waves stop. In cm. Default 300. Range 0-5000; 0: no easing. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveFollow", ClampMin = "0", ClampMax = "5000", Units = "cm"))
+	float WaveFollowEdgeFadeCm = 300.f;
+
+	/** The most a following vertex moves up or down: the wave height is clamped to it, which also bounds how far the material moves things
+	 * past their bounds (a material that follows the waves should allow this much World Position Offset). A bow wave higher than this
+	 * flattens on the plants. In cm. Default 60. Range 1-500. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveFollow", ClampMin = "1", ClampMax = "500", Units = "cm"))
+	float WaveFollowMaxHeightCm = 60.f;
+
 	/** Per simulation: overrides by NinjaLive actor name (its name or label), for a walled pool or a simulation of its own depth. Two ship
 	 * for the demo level (FNB_DemoPool): Pool_FluidNinja, a closed pool 4 m deep, and River_FluidNinja, a river lane 3 m deep. A NinjaLive
 	 * actor carrying a FluidNinja Wave Sim component (UFluidNinjaWaveSimComponent) is set up by that component instead, and an entry here
