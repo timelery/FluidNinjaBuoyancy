@@ -495,7 +495,8 @@ void UFluidNinjaWaterBirdComponent::SendPlunge(UFluidNinjaBuoyancySubsystem& Sub
 	FFluidNinjaWaterContact Contact;
 	Contact.Location = FVector(Where.X, Where.Y, SurfaceZ);
 	Contact.RadiusCm = FMath::Clamp(RadiusCm, 0.5f, 200.f);
-	Contact.SplashStrength = PlungeSplashScale;
+	// The system's own size is for a bird at actor scale 1: a bigger bird throws a bigger splash, as its parts do.
+	Contact.SplashStrength = PlungeSplashScale * OwnerScale();
 	Contact.SplashNormal = Up;
 	Contact.SplashDirection = Heading.GetSafeNormal();
 	Contact.SplashSystem = LoadedPlunge;

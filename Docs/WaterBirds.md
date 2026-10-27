@@ -181,8 +181,8 @@ plunge splash is one effect for the whole dive:
 - **Which way**: the system's Z is the water's normal and its +X the owner's forward laid on the water (the body's motion along the
   water when the owner points straight down), so a system that builds its sheets along ±Y puts them either side of the bird. The
   contact's **Splash Direction** carries the heading (Add Water Contact).
-- **How big**: **Plunge Splash Scale** (default 1, the system at its own size), not scaled by the speed: a dive's splash is an art
-  piece, and its size is the system's.
+- **How big**: **Plunge Splash Scale** (default 1, the system at its own size) times the owner's scale, not scaled by the speed:
+  a dive's splash is an art piece, and its size is the system's, for a bird at actor scale 1.
 - **The parts' own splashes** are held back around a dive, while a Plunge Splash System is set: the plunge splash is the dive's
   spray, and the parts' droplet bursts scattered over it read as clutter.
   - **Ahead of the body:** a part going in while the body, still above the water, comes down at Plunge Min Speed Cm S or faster

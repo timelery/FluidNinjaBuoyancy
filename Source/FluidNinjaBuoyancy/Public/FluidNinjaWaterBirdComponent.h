@@ -119,7 +119,8 @@ public:
 	/** The plunge splash: the big splash a dive throws up, spawned once when the Body Part goes into the water at Plunge Min Speed Cm S or
 	 * faster, on top of the parts' own small splashes (Splash System). It faces the bird's heading: the system's +X is the owner's forward
 	 * laid on the water (the body's velocity when the owner points along the water's normal) and its Z the water's normal, so a system with
-	 * sheets of water either side of the bird's path builds them along ±Y. Spawned at Plunge Splash Scale (not scaled by the speed), ahead of
+	 * sheets of water either side of the bird's path builds them along ±Y. Spawned at Plunge Splash Scale times the owner's scale (not
+	 * scaled by the speed), ahead of
 	 * the parts' own splashes in that frame's splash budget. The plunge splash is the dive's spray, so while it is set the parts' own
 	 * splashes are held back around a dive: a part going in while the body, still above the water, comes down at Plunge Min Speed Cm S or
 	 * faster behind it (a beak, a head), and every part for Plunge Quiet Seconds after the plunge (the feet following the body, the
@@ -134,7 +135,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "5000", Units = "cm/s"))
 	float PlungeMinSpeedCmS = 600.f;
 
-	/** The scale the plunge splash is spawned at: 1 is the system at its own size, 2 twice as large. 0: no plunge splash. 0-10. Default 1. */
+	/** The scale the plunge splash is spawned at, times the owner's scale: 1 is the system at its own size for a bird at actor scale 1, 2
+	 * twice as large. 0: no plunge splash. 0-10. Default 1. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "10"))
 	float PlungeSplashScale = 1.f;
 
