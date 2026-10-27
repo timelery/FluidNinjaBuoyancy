@@ -453,7 +453,9 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 		}
 		if (State.SinceWakeSent >= WakeIntervalSeconds && State.PendingWake >= FluidNinjaWaterBird::MinImpulseKgCmS)
 		{
-			Send(*Subsystem, Position + State.WakeDirection * Radius, Water.SurfaceZ, Water.Normal, Radius, State.PendingWake, 0.f, 0.f);
+			// At the sphere's bow, as wide as the edge that pushes it (Wake Edge Radius Cm; the sphere when unset).
+			const float WakeWidth = Part.WakeEdgeRadiusCm > 0.f ? Part.WakeEdgeRadiusCm * Scale : Radius;
+			Send(*Subsystem, Position + State.WakeDirection * Radius, Water.SurfaceZ, Water.Normal, WakeWidth, State.PendingWake, 0.f, 0.f);
 			State.PendingWake = 0.f;
 			State.SinceWakeSent = 0.f;
 		}

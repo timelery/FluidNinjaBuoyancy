@@ -58,6 +58,14 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterBirdPart
 	 * whose dips make rings by their up and down motion alone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")
 	bool bWake = false;
+
+	/** The width of the edge that presses this part's wake into the water (cm, at actor scale 1; it scales with the actor): a body's breast at
+	 * the water line is far narrower than its sphere, and a narrower source throws shorter, steeper ripples. A ring's band follows the
+	 * contact's width, so a 13 cm body's wake rings come out about ten times flatter than a 5 cm edge's, and they are the first a full ring
+	 * table drops (fnb.Waves.RingsMax). The drag pressed in still comes from the part's wet sphere, at its bow. 0: the part's Radius Cm (one
+	 * wide source). 0-200. Default 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "200", Units = "cm", EditCondition = "bWake"))
+	float WakeEdgeRadiusCm = 0.f;
 };
 
 /**
@@ -81,7 +89,8 @@ class FLUIDNINJABUOYANCY_API UFluidNinjaWaterBirdComponent : public UActorCompon
 public:
 	UFluidNinjaWaterBirdComponent();
 
-	/** The parts that touch the water: a sphere on a bone each (Name, Bone, Reference Point, Radius Cm, Added Mass Kg, Splash Scale, Wake).
+	/** The parts that touch the water: a sphere on a bone each (Name, Bone, Reference Point, Radius Cm, Added Mass Kg, Splash Scale, Wake,
+	 * Wake Edge Radius Cm).
 	 * Read when the mesh is bound (Begin Play, a new Mesh or mesh asset, a change in their number) and when contacts are switched on, so set
 	 * them before then. Empty: the component does nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")

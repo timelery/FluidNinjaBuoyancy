@@ -67,6 +67,7 @@ the rest still works.
    Body.RadiusCm = 13.f;
    Body.AddedMassKg = 2.5f;
    Body.bWake = true;
+   Body.WakeEdgeRadiusCm = 5.f;                      // the breast at the water line, not the 13 cm sphere
    WaterBird->Parts.Add(Body);
    // ... Head, Beak, FootL, FootR the same way
    WaterBird->MassKg = 3.5f;
@@ -76,12 +77,12 @@ the rest still works.
    The component ticks after physics and after that mesh's own tick, so it reads each frame's finished pose.
 3. **Parts**: one sphere per body part that touches the water ([Parts](#parts)). A bird the size of a brown pelican (3.5 kg):
 
-   | Name | Bone (your rig's) | Radius Cm | Added Mass Kg | Splash Scale | Wake |
-   |---|---|---|---|---|---|
-   | Body | a spine bone, the point at the body's centre | 13 | 2.5 | 1 | on |
-   | Head | the head bone | 5 | 0.3 | 1 | off |
-   | Beak | the beak's tip bone | 2.5 | 0.08 | 1 | off |
-   | FootL / FootR | the toe bones, the point under the webbing | 5 | 0.12 | 1 | on |
+   | Name | Bone (your rig's) | Radius Cm | Added Mass Kg | Splash Scale | Wake | Wake Edge Radius Cm |
+   |---|---|---|---|---|---|---|
+   | Body | a spine bone, the point at the body's centre | 13 | 2.5 | 1 | on | 5 |
+   | Head | the head bone | 5 | 0.3 | 1 | off | 0 |
+   | Beak | the beak's tip bone | 2.5 | 0.08 | 1 | off | 0 |
+   | FootL / FootR | the toe bones, the point under the webbing | 5 | 0.12 | 1 | on | 0 |
 
 4. **Body Part** names the body (default `Body`), and **Mass Kg** is the whole bird's mass at scale 1: together they give how high it
    floats and how fast it bobs.
@@ -113,6 +114,7 @@ Location** (Part) every frame; it must sit on the body part through the whole an
 | **Added Mass Kg** | The water moving with the part (kg at scale 1; it scales by the scale's cube): how hard the part pushes the water. A sphere's is half the water it displaces fully under, 0.5 × 0.001 × 4/3 π r³: 0.26 kg at 5 cm, 4.6 kg at 13 cm. A flat foot or a spread wing pushes more than its volume says; a streamlined beak less. |
 | **Splash Scale** | Art multiplier on this part's splashes (0: rings but no spray, as for a foot paddling under the body). |
 | **Wake** | While wet, its motion along the water also pushes a wake at its bow (the body and the paddling feet). |
+| **Wake Edge Radius Cm** | The width of the edge that presses the wake in (cm at scale 1): a body's breast at the water line, far narrower than its sphere. The wake's rings take their band from it, so a 13 cm body sphere's wake comes out about ten times flatter than a 5 cm edge's (and a full ring table drops it first). 0: the part's Radius Cm. |
 
 The parts are spheres because a sphere's wet fraction and footprint follow from one number. A wing dragged along the water is a
 sphere of the wing's width placed at its middle, with the added mass of the water the wing moves.
@@ -143,12 +145,13 @@ impulse.
 
 **Wake.** A wet part with **Wake** on pays drag as it moves along the water, 0.5 ρ Cd (π r² f) |v_h|² over the frame (kg·cm/s,
 Cd = **Wake Drag Coefficient**), faded by depth as above, pressed into the water at its bow, the part's centre plus its direction of
-travel times r. A pelican-sized body floating (f about 0.38) and paddling at 55 cm/s sends about 18 kg·cm/s every 0.15 s.
+travel times r. A pelican-sized body floating (f about 0.38) and paddling at 55 cm/s sends about 18 kg·cm/s every 0.15 s. The
+wake's footprint is the part's **Wake Edge Radius Cm** when set (the narrow front that really pushes the water), else its radius.
 
 **Sending.** What gathered is sent as one contact at the part's (x, y) on the surface at most every **Ring Interval Seconds**, once
 it reaches 0.5 kg·cm/s; the wake at most every **Wake Interval Seconds** (0.15: rings 8 cm apart at 55 cm/s, one wake), at the bow.
 Entries and exits are sent at once, with what gathered so far and the splash. Each contact's footprint is the part's radius
-(0.5-200 cm).
+(0.5-200 cm), a wake contact's its Wake Edge Radius Cm when set.
 
 ---
 
@@ -267,6 +270,7 @@ height above the root, the root sits that height less Get Float Body Above Water
 | Rings from under the water too strong or weak | **Depth Fade Radii** |
 | Rings coarse, in steps | **Ring Interval Seconds** down |
 | The swimming wake (V) too strong or weak | **Wake Drag Coefficient**; **Wake** off on a part |
+| A swimming bird leaves no visible wake | the body's **Wake Edge Radius Cm** (about 5 cm for a pelican): a wide body sphere's wake is flat and the first a full ring table drops; feet deep under the body fade by depth, as they should |
 | Short ripples die too soon or linger | the project's **Wave Ring Viscosity Cm2 S** |
 | White patches | **Entry Foam Rate** down (0: none) |
 | The bird bobs too long or too stiffly | **Heave Damping Ratio** (the movement's spring) |
