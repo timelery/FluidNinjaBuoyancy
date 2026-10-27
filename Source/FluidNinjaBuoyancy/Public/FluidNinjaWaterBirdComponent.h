@@ -146,6 +146,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "3", Units = "s"))
 	float PlungeQuietSeconds = 0.6f;
 
+	/** Values for the plunge splash system's float user parameters, by name (as in its User Parameters, with or without "User."), set
+	 * on every plunge splash this bird throws: the size of its splash per bird or per placed actor, from one splash system (a crown
+	 * splash's diameter and height, say). They are in the system's own units, at actor scale 1: the splash is still spawned at Plunge
+	 * Splash Scale times the owner's scale. Names the system does not have change nothing. Empty (the default): the system's own values. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")
+	TMap<FName, float> PlungeSplashParameters;
+
 	/** Fresh foam per second the body part's entry drops over 1.5 x its radius for 0.25 s (aged foam at a fifth of it), on the foam's scale
 	 * where about 1-5 whitens a churned patch in under a second (Add Water Foam). Only the Body Part's entries, and only with foam v2. 0: no
 	 * foam. 0-5. Default 0.04: a trace of white where the body went in, no white patch. */

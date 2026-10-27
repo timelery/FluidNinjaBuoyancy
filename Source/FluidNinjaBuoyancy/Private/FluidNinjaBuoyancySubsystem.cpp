@@ -4829,8 +4829,22 @@ void UFluidNinjaBuoyancySubsystem::AddWaterContact(const FFluidNinjaWaterContact
 			const FVector Along = Contact.SplashDirection.ContainsNaN() ? FVector::ZeroVector : FVector::VectorPlaneProject(Contact.SplashDirection, Up);
 			const FRotator Facing = Along.SizeSquared() > UE_KINDA_SMALL_NUMBER ? FRotationMatrix::MakeFromZX(Up, Along).Rotator()
 				: FRotationMatrix::MakeFromZ(Up).Rotator();
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, System, Contact.Location, Facing, FVector(Contact.SplashStrength),
-				true, true, ENCPoolMethod::AutoRelease);
+			// With parameters, spawned inactive and activated once they are set, so the first spawn and any warm-up ticks see them. A
+			// pooled splash comes back with the system's own values (UNiagaraComponent::OnPooledReuse).
+			const bool bParameters = !Contact.SplashParameters.IsEmpty();
+			UNiagaraComponent* Splash = UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, System, Contact.Location, Facing,
+				FVector(Contact.SplashStrength), true, !bParameters, ENCPoolMethod::AutoRelease);
+			if (Splash && bParameters)
+			{
+				for (const TPair<FName, float>& Parameter : Contact.SplashParameters)
+				{
+					if (FMath::IsFinite(Parameter.Value))
+					{
+						Splash->SetVariableFloat(Parameter.Key, Parameter.Value);
+					}
+				}
+				Splash->Activate(true);
+			}
 			INC_DWORD_STAT(STAT_FNB_SplashSpawns);
 		}
 	}

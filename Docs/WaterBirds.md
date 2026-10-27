@@ -183,6 +183,11 @@ plunge splash is one effect for the whole dive:
   contact's **Splash Direction** carries the heading (Add Water Contact).
 - **How big**: **Plunge Splash Scale** (default 1, the system at its own size) times the owner's scale, not scaled by the speed:
   a dive's splash is an art piece, and its size is the system's, for a bird at actor scale 1.
+- **Per bird or actor**: **Plunge Splash Parameters** sets the plunge splash system's float user parameters on every plunge splash
+  this component throws (by name, with or without `User.`; the parts' own splashes are unchanged), so one system serves birds and other bodies of different sizes. A crown splash
+  built with, say, `CrownDiameterCm` and `CrownHeightCm` parameters gets each actor's own diameter and height. The values are in the
+  system's units at actor scale 1 (Plunge Splash Scale and the owner's scale still apply on top). Names the system lacks change
+  nothing; empty uses the system's own values. A pooled splash starts from the system's own values every time.
 - **The parts' own splashes** are held back around a dive, while a Plunge Splash System is set: the plunge splash is the dive's
   spray, and the parts' droplet bursts scattered over it read as clutter.
   - **Ahead of the body:** a part going in while the body, still above the water, comes down at Plunge Min Speed Cm S or faster
@@ -254,7 +259,7 @@ height above the root, the root sits that height less Get Float Body Above Water
 |---|---|
 | Splashes too big or too many | **Splash Scale**, a part's **Splash Scale**, **Min Splash Speed Cm S** |
 | A dive throws no plunge splash, or a landing throws one | **Plunge Min Speed Cm S** against `entry_speed_cm_s` |
-| The plunge splash too big or small | **Plunge Splash Scale**, or the system itself |
+| The plunge splash too big or small | **Plunge Splash Parameters** (the system's size parameters, per actor), **Plunge Splash Scale** |
 | Droplet bursts on top of a dive's plunge splash | **Plunge Quiet Seconds** up; `splashes_held_back` counts what was held back |
 | Rings too weak or too strong overall | the parts' **Added Mass Kg**; the project's **Wave Ring Strength** (rings only) or **Wave Impulse Scale** (grid and rings) |
 | The ring table full, rings cut short | **Wake Interval Seconds** or **Ring Interval Seconds** up, or `fnb.Waves.RingsMax` |

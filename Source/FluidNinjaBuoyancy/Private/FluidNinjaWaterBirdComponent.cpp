@@ -500,6 +500,7 @@ void UFluidNinjaWaterBirdComponent::SendPlunge(UFluidNinjaBuoyancySubsystem& Sub
 	Contact.SplashNormal = Up;
 	Contact.SplashDirection = Heading.GetSafeNormal();
 	Contact.SplashSystem = LoadedPlunge;
+	Contact.SplashParameters = PlungeSplashParameters;
 	Subsystem.AddWaterContact(Contact);
 	++Plunges;
 	SincePlunge = 0.f;

@@ -255,6 +255,14 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterContact
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
 	FVector SplashDirection = FVector::ZeroVector;
 
+	/** Values for the splash system's float user parameters, by name (as in its User Parameters, with or without "User."), set on this
+	 * contact's splash before it starts, so one splash system serves bodies of different sizes (a splash built with, say, a Crown
+	 * Diameter Cm parameter). They are in the system's own units; the splash is still spawned at Splash Strength. Names the system does not
+	 * have change nothing. A pooled splash starts from the system's own values every time, so nothing carries over from another contact.
+	 * Empty (the default): the system's own values. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	TMap<FName, float> SplashParameters;
+
 	/** The splash system; none (the default): the project's Splash System (Project Settings → FluidNinja Buoyancy → Effects). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
 	TObjectPtr<UNiagaraSystem> SplashSystem = nullptr;
