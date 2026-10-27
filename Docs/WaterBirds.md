@@ -85,8 +85,9 @@ the rest still works.
    | FootL / FootR | the toe bones, the point under the webbing | 5 | 0.12 | 1 | on | 0 |
    | WingL / WingR (optional) | an outer-wing bone, the point among the primaries | 7 | 0.3 | 0 | off | 0 |
 
-   The wings also get **Air Reach Cm** 30 and **Air Area Cm2** 2500 (the [downwash](#the-downwash)): a beat that comes down near the
-   water ripples it whether or not the feathers touch.
+   The wings also get **Air Reach Cm** 30, **Air Area Cm2** 2500 and **Air Strength** 4 (the [downwash](#the-downwash)): a beat that
+   comes down near the water ripples it whether or not the feathers touch. The component's **Air View Distance Cm** (2000 for a
+   pelican) keeps that detail to birds near the camera.
 
 4. **Body Part** names the body (default `Body`), and **Mass Kg** is the whole bird's mass at scale 1: together they give how high it
    floats and how fast it bobs.
@@ -120,6 +121,7 @@ Location** (Part) every frame; it must sit on the body part through the whole an
 | **Wake** | While wet, its motion along the water also pushes a wake at its bow (the body and the paddling feet). |
 | **Air Reach Cm** | The [downwash](#the-downwash): how high above the water (from the sphere's bottom, cm at scale 1) a part beating down still disturbs it through the air. About the wing's width (a pelican's: 30). 0: none. |
 | **Air Area Cm2** | The wing area that drives the air down (cm² at scale 1): the push grows with it and its ripples spread over a patch that size. Use the whole wing's area (a brown pelican's: about 2500). |
+| **Air Strength** | Art multiplier on the downwash's push (default 1, the air's own). A gust shows as millimetre roughness finer than the ring layer draws, so the real push draws as a slope of a few hundredths; raise it until the patch reads (a pelican: 4). |
 | **Wake Edge Radius Cm** | The width of the edge that presses the wake in (cm at scale 1): a body's breast at the water line, far narrower than its sphere. The wake's rings take their band from it, so a 13 cm body sphere's wake comes out about ten times flatter than a 5 cm edge's (and a full ring table drops it first). 0: the part's Radius Cm. |
 
 The parts are spheres because a sphere's wet fraction and footprint follow from one number. A wing dragged along the water is a
@@ -162,8 +164,15 @@ moving down drives air onto the water under it: the momentum flux of the air it 
 surface. It is sent at most every **Ring Interval Seconds**, once 1.5 kg·cm/s has gathered, as three fine ripples (4 cm wide)
 at random points of a patch of area A under the part: a gust's patch of short ripples, no spray. A pelican's wing beating down
 at 4 m/s right over the water presses about a tenth of what slapping it would; air being 800 times lighter than water, it stays
-a light touch. Once the part touches the water the momentum model above takes over. `air_pushes` in Get Diagnostics counts the
-patches.
+a light touch. Once the part touches the water the momentum model above takes over. `air_pushes` and `air_impulse_sum_kg_cm_s`
+in Get Diagnostics count the patches and what they pressed in.
+
+How strong it looks: a ring's drawn slope is its impulse × Wave Impulse Scale × Wave Ring Strength / 100 kg·cm/s × its band's
+peak slope (logged with each LUT build: 3.51 for the finest band on an 11.7 cm grid). A floating pelican's beats press about
+2.1 kg·cm/s per ripple point, a slope of 0.10 at Wave Ring Strength 4: **Air Strength** scales it (4: about 0.4; Wave Ring Max
+Slope still caps it). The component's **Air View Distance Cm** turns the downwash off for an owner further than that from the
+player's camera (0: always on): its 4 cm ripples are about a pixel at 20 m on a 1080p screen, and each takes a slot in the ring
+table, so a flock across the lake costs nothing.
 
 **Sending.** What gathered is sent as one contact at the part's (x, y) on the surface at most every **Ring Interval Seconds**, once
 it reaches 0.5 kg·cm/s; the wake at most every **Wake Interval Seconds** (0.15: rings 8 cm apart at 55 cm/s, one wake), at the bow.
@@ -240,8 +249,10 @@ size), **Wave Ring Viscosity Cm2 S** (how soon short ripples die: 0.01 clean wat
 
 **The ring budget.** Every contact with an impulse takes a slot for 8 s. A paddling bird sends about 7 wake contacts a second for
 each part with Wake on (Wake Interval Seconds 0.15) and its bob a few more; when the table is full the smallest, oldest rings go
-first, so a dive's rings live their full time. For several birds on one simulation raise **Wake Interval Seconds** or
-`fnb.Waves.RingsMax`.
+first, so a dive's rings live their full time, and rings far from the camera count for less (`fnb.Waves.RingsViewCm`, default
+1500: a ring 15 m away counts half, 30 m a fifth), so the birds the player looks at keep theirs. For several birds on one
+simulation raise **Wake Interval Seconds** or `fnb.Waves.RingsMax`, and give fine detail such as the downwash an **Air View
+Distance Cm**.
 
 ---
 
@@ -286,7 +297,9 @@ height above the root, the root sits that height less Get Float Body Above Water
 | A dive's rings too steep or too faint | the project's **Wave Ring Max Slope** |
 | Rings from under the water too strong or weak | **Depth Fade Radii** |
 | Rings coarse, in steps | **Ring Interval Seconds** down |
-| Wing beats over the water leave no ripples, or too many | the wing parts' **Air Area Cm2** (strength) and **Air Reach Cm** (how high a beat still reaches the water); `air_pushes` counts them |
+| Wing beats over the water leave no ripples, or too many | the wing parts' **Air Strength** (how strongly the patch draws), **Air Area Cm2** (the push and the patch's size), **Air Reach Cm** (how high a beat still reaches the water); `air_pushes` counts them |
+| The downwash runs for birds too far to see it | **Air View Distance Cm** on the component |
+| A bird's small rings vanish in a busy scene | `fnb.Waves.RingsViewCm` lower (nearer rings win more), `fnb.Waves.RingsMax` up |
 | The swimming wake (V) too strong or weak | **Wake Drag Coefficient**; **Wake** off on a part |
 | A swimming bird leaves no visible wake | the body's **Wake Edge Radius Cm** (about 5 cm for a pelican): a wide body sphere's wake is flat and the first a full ring table drops; feet deep under the body fade by depth, as they should |
 | Short ripples die too soon or linger | the project's **Wave Ring Viscosity Cm2 S** |
@@ -308,6 +321,7 @@ height above the root, the root sits that height less Get Float Body Above Water
 | `splashes` | Contacts sent with a splash of strength 0.2 or more (Get Splashes); the budget may leave some undrawn. |
 | `plunges` | Plunge splashes sent (Get Plunges). |
 | `splashes_held_back` | Parts' splashes held back around a dive (ahead of the diving body, or within Plunge Quiet Seconds after a plunge). |
+| `air_pushes`, `air_impulse_sum_kg_cm_s` | Downwash patches sent and what they pressed in (Air Strength included). |
 | `water_readback_fallbacks` | Samples where the waves' readback was over 0.5 s old and the still water stood in. |
 | `impulse_abs_sum_kg_cm_s` | The sum of every sent impulse's size. |
 | `part_names` | The parts, in order; the arrays below follow it. |

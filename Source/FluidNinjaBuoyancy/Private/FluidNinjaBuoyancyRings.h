@@ -62,6 +62,13 @@ namespace FluidNinjaBuoyancyRings
 		/** Drops every ring and writes the table empty (N = 0) if it held any: before the state goes (its simulation stopped), since the
 		 * surfaces keep the texture bound. */
 		void Clear();
+		/** Where the camera is (world XY), for which rings to drop first when the table is full: a ring far from it counts for less
+		 * (fnb.Waves.RingsViewCm). Without a camera (bInHasView false) every ring counts by its amplitude and age alone. */
+		void SetView(const FVector2D& InViewXY, bool bInHasView)
+		{
+			ViewXY = InViewXY;
+			bHasView = bInHasView;
+		}
 		UTexture2D* GetTable() const { return Table.Get(); }
 		UTexture2D* GetLUT() const { return Lut.Get(); }
 		int32 Num() const { return Rings.Num(); }
@@ -88,10 +95,13 @@ namespace FluidNinjaBuoyancyRings
 		void WriteTable(double Now);
 		/** The amplitude a ring draws with: its own, held to Wave Ring Max Slope by its band's steepest LUT slope (no LUT yet: its own). */
 		float DrawnAmplitude(const FRing& Ring) const;
-		/** The ring that matters least now (the smallest drawn amplitude still to come: |a| x the share of its life left). */
+		/** The ring that matters least now (the smallest drawn slope still to come: |a| x its band's peak slope x the share of its life left,
+		 * less the further it is from the camera: / (1 + (distance / fnb.Waves.RingsViewCm)^2)). */
 		int32 LeastImportant(double Now) const;
 
 		TArray<FRing> Rings;
+		FVector2D ViewXY = FVector2D::ZeroVector;
+		bool bHasView = false;
 		TStrongObjectPtr<UTexture2D> Table;
 		int32 TableWidth = 0;
 		/** The table's last write held rings (so emptying it writes N = 0 once). */

@@ -82,6 +82,13 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterBirdPart
 	 * stronger, wider patch. 0-20000. Default 1000. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "20000", EditCondition = "AirReachCm > 0"))
 	float AirAreaCm2 = 1000.f;
+
+	/** Art multiplier on the downwash's push, and so on its ripples. A gust shows on water as a roughening of millimetre ripples, finer than
+	 * the ring layer draws (its finest rings are 2.5 cm), so the downwash's real push, drawn as those rings, comes out a slope of a few
+	 * hundredths: invisible. Raise it until the patch under a beating wing reads (the drawn slope is capped by the project's Wave Ring Max
+	 * Slope). 1: the push as the air gives it. 0-100. Default 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "100", EditCondition = "AirReachCm > 0"))
+	float AirStrength = 1.f;
 };
 
 /**
@@ -106,11 +113,18 @@ public:
 	UFluidNinjaWaterBirdComponent();
 
 	/** The parts that touch the water: a sphere on a bone each (Name, Bone, Reference Point, Radius Cm, Added Mass Kg, Splash Scale, Wake,
-	 * Wake Edge Radius Cm, Air Reach Cm, Air Area Cm2).
+	 * Wake Edge Radius Cm, Air Reach Cm, Air Area Cm2, Air Strength).
 	 * Read when the mesh is bound (Begin Play, a new Mesh or mesh asset, a change in their number) and when contacts are switched on, so set
 	 * them before then. Empty: the component does nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")
 	TArray<FFluidNinjaWaterBirdPart> Parts;
+
+	/** How near the camera must be for the downwash (the parts' Air Reach Cm) to run (cm, straight-line from the player's camera to the
+	 * owner): its fine ripples cannot be seen from further away, and each costs a slot in the simulation's ring table and a little GPU time
+	 * per water pixel near it, so past this distance the parts neither gather nor send it (contacts, splashes and wakes go on). A 4 cm ripple
+	 * is about a pixel at 20 m on a 1080p screen. 0: at any distance. 0-100000. Default 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "100000", Units = "cm"))
+	float AirViewDistanceCm = 0.f;
 
 	/** The part that is the bird's body (by Name): its sphere floats the bird (Get Float Body Above Water Cm, Get Heave Frequency Hz) and only
 	 * its entries drop foam (Entry Foam Rate). None, or a name no part has: no foam, and both functions return 0. Default Body. */
@@ -253,7 +267,7 @@ public:
 	float GetHeaveFrequencyHz() const;
 
 	/** For QA: a JSON object with the counters (water_contacts on/off, water_entries, water_exits, contacts, splashes, plunges,
-	 * splashes_held_back, air_pushes, water_readback_fallbacks, impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth
+	 * splashes_held_back, air_pushes, air_impulse_sum_kg_cm_s, water_readback_fallbacks, impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth
 	 * since Reset Peak Depths (cm; -10000 when not measured), its wet fraction and its speed at its last entry (cm/s; 0: none yet), then the
 	 * floating body's height above the water and the heave frequency. */
 	UFUNCTION(BlueprintPure, Category = "Water Bird")
@@ -378,6 +392,8 @@ private:
 	int32 HeldBack = 0;
 	/** Downwash patches sent (Air Reach Cm), since Begin Play. */
 	int32 AirPushes = 0;
+	/** What the downwash patches pressed in, summed (kg·cm/s, Air Strength included). */
+	double AirImpulseSum = 0.0;
 	int32 ReadbackFallbacks = 0;
 	double ImpulseAbsSum = 0.0;
 };

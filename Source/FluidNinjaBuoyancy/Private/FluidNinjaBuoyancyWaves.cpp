@@ -1961,6 +1961,7 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	if (Sim.Rings)
 	{
 		const UWorld* RingWorld = GetOwnerWorld();
+		Sim.Rings->SetView(BenchCamera, bBenchCamera);   // the frame input's camera: rings near it keep their slots first
 		Sim.Rings->Update(RingWorld ? RingWorld->GetTimeSeconds() : 0.0, Sim.Centre, Sim.CellCm, Sim.DepthCm);
 		UTexture2D* RingTable = Sim.Rings->GetTable();
 		UTexture2D* RingLUT = Sim.Rings->GetLUT();

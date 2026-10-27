@@ -28,6 +28,11 @@ namespace FluidNinjaBuoyancyRings
 			TEXT("The most rings one simulation draws at once (each costs a table load and a LUT sample per water pixel within 6 m of it): a new ring ")
 			TEXT("past it drops the one that matters least (the smallest drawn amplitude times the share of its life left), so a paddling bird's ")
 			TEXT("small rings do not push out a dive's. Default 64; 0 to 128; 0 draws none."));
+		float RingsViewCm = 1500.f;
+		FAutoConsoleVariableRef CVarRingsViewCm(TEXT("fnb.Waves.RingsViewCm"), RingsViewCm,
+			TEXT("When a simulation's ring table is full, rings far from the camera count for less, so the ripples the player looks at keep their ")
+			TEXT("slots: a ring's importance (its drawn slope times the share of its life left) is divided by 1 + (distance / this)^2, in cm along ")
+			TEXT("the water. Default 1500 (a ring 15 m away counts half, 30 m a fifth); 0 or less: distance does not matter."));
 
 		constexpr double Gravity = 981.0;          // cm/s²
 		constexpr double SurfaceTension = 72.8;    // σ / ρ of water, cm³/s²
@@ -610,8 +615,9 @@ namespace FluidNinjaBuoyancyRings
 			}
 		}
 		LutBuildMs = (FPlatformTime::Seconds() - Start) * 1000.0;
-		UE_LOG(LogFluidNinjaBuoyancy, Log, TEXT("FluidNinja Buoyancy rings: LUT built in %.1f ms (%d x %d RGBA16F, %d + %d + %d wavenumbers; wave cell %.2f cm, grid sigma %.2f / %.2f / %.2f cm, depth %.0f cm, viscosity %.3f cm2/s)."),
-			LutBuildMs, LutRadii, LutTimes * NumBands, Models[0].K, Models[1].K, Models[2].K, WaveCellCm, Models[0].SigmaG, Models[1].SigmaG, Models[2].SigmaG, DepthCm, Viscosity);
+		UE_LOG(LogFluidNinjaBuoyancy, Log, TEXT("FluidNinja Buoyancy rings: LUT built in %.1f ms (%d x %d RGBA16F, %d + %d + %d wavenumbers; wave cell %.2f cm, grid sigma %.2f / %.2f / %.2f cm, depth %.0f cm, viscosity %.3f cm2/s; peak slope per %.0f kg*cm/s %.4f / %.4f / %.4f)."),
+			LutBuildMs, LutRadii, LutTimes * NumBands, Models[0].K, Models[1].K, Models[2].K, WaveCellCm, Models[0].SigmaG, Models[1].SigmaG, Models[2].SigmaG, DepthCm, Viscosity,
+			LutUnitImpulse, PeakSlope[0], PeakSlope[1], PeakSlope[2]);
 	}
 
 	void FState::WriteTable(double Now)
@@ -678,7 +684,11 @@ namespace FluidNinjaBuoyancyRings
 		{
 			const FRing& Ring = Rings[Index];
 			const double Left = FMath::Clamp(1.0 - (Now - Ring.Born) / LutSeconds, 0.0, 1.0);
-			const double Weight = FMath::Abs(static_cast<double>(DrawnAmplitude(Ring))) * PeakSlope[FMath::Clamp(Ring.Band, 0, NumBands - 1)] * Left;
+			double Weight = FMath::Abs(static_cast<double>(DrawnAmplitude(Ring))) * PeakSlope[FMath::Clamp(Ring.Band, 0, NumBands - 1)] * Left;
+			if (bHasView && RingsViewCm > 0.f)
+			{
+				Weight /= 1.0 + FVector2D::DistSquared(Ring.Location, ViewXY) / FMath::Square(static_cast<double>(RingsViewCm));
+			}
 			if (Weight < LeastWeight)
 			{
 				LeastWeight = Weight;
