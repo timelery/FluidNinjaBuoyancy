@@ -66,7 +66,8 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterBirdPart
  * a bone) is followed every frame while contacts are on; the water it carries with it, its added mass times its wet fraction times its
  * speed down, is handed to the water as it changes, so going in presses the water down, coming up pulls it, and a bobbing body rings. Each
  * hand-over is one AddWaterContact on the FluidNinja Buoyancy subsystem: an impulse into FluidNinja Waves' grid, a fine ring in the surface
- * material's ring layer, and, where a part goes in or comes out fast, a small splash (and, for the body's entry, a touch of foam).
+ * material's ring layer, and, where a part goes in or comes out fast, a small splash (and, for the body's entry, a touch of foam; for a dive,
+ * the plunge splash).
  *
  * The component moves nothing: the movement that floats the bird reads Get Float Body Above Water Cm and Get Heave Frequency Hz (with Heave
  * Damping Ratio) to hold the body on its waterline. Contacts are off until Set Contacts Enabled (or Contacts Enabled in the Details panel):
@@ -114,6 +115,34 @@ public:
 	 * gently stays clean. Lower: splashes from gentler moves too. 0-2000. Default 60. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "2000", Units = "cm/s"))
 	float MinSplashSpeedCmS = 60.f;
+
+	/** The plunge splash: the big splash a dive throws up, spawned once when the Body Part goes into the water at Plunge Min Speed Cm S or
+	 * faster, on top of the parts' own small splashes (Splash System). It faces the bird's heading: the system's +X is the owner's forward
+	 * laid on the water (the body's velocity when the owner points along the water's normal) and its Z the water's normal, so a system with
+	 * sheets of water either side of the bird's path builds them along ±Y. Spawned at Plunge Splash Scale (not scaled by the speed), ahead of
+	 * the parts' own splashes in that frame's splash budget. The plunge splash is the dive's spray, so while it is set the parts' own
+	 * splashes are held back around a dive: a part going in while the body, still above the water, comes down at Plunge Min Speed Cm S or
+	 * faster behind it (a beak, a head), and every part for Plunge Quiet Seconds after the plunge (the feet following the body, the
+	 * surfacing). Loaded at Begin Play. Empty (the default): no plunge splash, and every part splashes as usual. Set but failing to load:
+	 * the same (logged once). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")
+	TSoftObjectPtr<UNiagaraSystem> PlungeSplashSystem;
+
+	/** The body's speed going in (cm/s, world) at and above which it throws the plunge splash; the body coming down this fast while still
+	 * above the water also holds back the splashes of parts going in ahead of it. Set it between the bird's landings and its dives
+	 * (GetDiagnostics lists each part's last entry speed, entry_speed_cm_s). Lower: gentler entries plunge too. 0-5000. Default 600. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "5000", Units = "cm/s"))
+	float PlungeMinSpeedCmS = 600.f;
+
+	/** The scale the plunge splash is spawned at: 1 is the system at its own size, 2 twice as large. 0: no plunge splash. 0-10. Default 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "10"))
+	float PlungeSplashScale = 1.f;
+
+	/** How long after a plunge splash the parts' own splashes are held back (s): the feet going in behind the body and the bird surfacing
+	 * would scatter droplet bursts over the plunge's spray. Longer: a cleaner dive; 0: only the parts going in ahead of the body are held
+	 * back. 0-3. Default 0.6 (a pelican's feet follow its body in 0.07 s and it surfaces 0.4-0.5 s after the plunge). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "3", Units = "s"))
+	float PlungeQuietSeconds = 0.6f;
 
 	/** Fresh foam per second the body part's entry drops over 1.5 x its radius for 0.25 s (aged foam at a fifth of it), on the foam's scale
 	 * where about 1-5 whitens a churned patch in under a second (Add Water Foam). Only the Body Part's entries, and only with foam v2. 0: no
@@ -189,9 +218,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Water Bird")
 	float GetHeaveFrequencyHz() const;
 
-	/** For QA: a JSON object with the counters (water_contacts on/off, water_entries, water_exits, contacts, splashes, water_readback_fallbacks,
-	 * impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth since Reset Peak Depths
-	 * (cm; -10000 when not measured) and its wet fraction, then the floating body's height above the water and the heave frequency. */
+	/** For QA: a JSON object with the counters (water_contacts on/off, water_entries, water_exits, contacts, splashes, plunges,
+	 * splashes_held_back, water_readback_fallbacks, impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth
+	 * since Reset Peak Depths (cm; -10000 when not measured), its wet fraction and its speed at its last entry (cm/s; 0: none yet), then the
+	 * floating body's height above the water and the heave frequency. */
 	UFUNCTION(BlueprintPure, Category = "Water Bird")
 	FString GetDiagnostics() const;
 
@@ -215,6 +245,10 @@ public:
 	 * may still leave some undrawn). */
 	UFUNCTION(BlueprintPure, Category = "Water Bird")
 	int32 GetSplashes() const { return Splashes; }
+
+	/** Plunge splashes sent (the Body Part going in at Plunge Min Speed Cm S or faster, with a Plunge Splash System), since Begin Play. */
+	UFUNCTION(BlueprintPure, Category = "Water Bird")
+	int32 GetPlunges() const { return Plunges; }
 
 	/** Each part's depth under the surface on the last frame (cm, negative above it; -10000 when not measured), in Parts' order. */
 	const TArray<float>& GetDepths() const { return Depths; }
@@ -261,11 +295,15 @@ private:
 	/** Rebuilds the parts' bones and offsets from InMesh's reference pose, makes this component tick after it, starts the parts over. */
 	void Bind(USkeletalMeshComponent* InMesh);
 	void LoadSplash();
+	void LoadPlunge();
 	void UpdateContacts(float DeltaSeconds);
 	/** The water at Location: GetWaterAtLocation, with the still water standing in when the waves' readback is over 0.5 s old. */
 	bool SampleWater(const FVector& Location, FFluidNinjaWaterSample& OutWater);
 	void Send(UFluidNinjaBuoyancySubsystem& Subsystem, const FVector& Where, float SurfaceZ, const FVector& Normal, float RadiusCm, float ImpulseDown,
 		float SplashStrength, float FoamRate);
+	/** The plunge splash at Where on the water, facing the owner's heading (Velocity's when the owner points along the water's normal). */
+	void SendPlunge(UFluidNinjaBuoyancySubsystem& Subsystem, const FVector& Where, float SurfaceZ, const FVector& Normal, float RadiusCm,
+		const FVector& Velocity);
 	float OwnerScale() const;
 	const FFluidNinjaWaterBirdPart* FindBodyPart() const;
 
@@ -274,6 +312,13 @@ private:
 	FSoftObjectPath LoadedSplashPath;
 	/** Splash System is set but did not load: no splashes. */
 	bool bSplashMissing = false;
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraSystem> LoadedPlunge;
+	FSoftObjectPath LoadedPlungePath;
+	/** Seconds since the last plunge splash (large: none yet), and whether the body was last seen diving in (dry, coming down at plunge
+	 * speed): the parts' own splashes are held back around a dive. */
+	float SincePlunge = 1.0e6f;
+	bool bBodyDiving = false;
 
 	TWeakObjectPtr<USkeletalMeshComponent> BoundMesh;
 	TWeakObjectPtr<const USkeletalMesh> BoundAsset;
@@ -284,11 +329,16 @@ private:
 	TArray<FPartState> States;
 	TArray<float> Depths;
 	TArray<float> PeakDepths;
+	/** Each part's speed at its last entry while moving (cm/s; 0: none yet), in Parts' order (GetDiagnostics). */
+	TArray<float> EntrySpeeds;
 
 	int32 Entries = 0;
 	int32 Exits = 0;
 	int32 Contacts = 0;
 	int32 Splashes = 0;
+	int32 Plunges = 0;
+	/** Splashes the parts would have thrown, held back around a dive (Plunge Quiet Seconds, the body diving in behind them). */
+	int32 HeldBack = 0;
 	int32 ReadbackFallbacks = 0;
 	double ImpulseAbsSum = 0.0;
 };

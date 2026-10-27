@@ -248,6 +248,13 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterContact
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
 	FVector SplashNormal = FVector::UpVector;
 
+	/** The way the splash faces along the water (world): the splash system's +X turns toward this direction laid on the water (the plane
+	 * across Splash Normal), so a splash shaped for a heading lines up with it, such as a diving bird's sheets either side of its path along
+	 * the system's ±Y. Zero (the default), or a direction along Splash Normal: the system keeps the world's heading (+X toward world X where
+	 * it can), as before. Any vector; only its direction counts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	FVector SplashDirection = FVector::ZeroVector;
+
 	/** The splash system; none (the default): the project's Splash System (Project Settings → FluidNinja Buoyancy → Effects). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
 	TObjectPtr<UNiagaraSystem> SplashSystem = nullptr;

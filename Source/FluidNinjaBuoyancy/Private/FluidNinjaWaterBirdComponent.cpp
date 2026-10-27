@@ -128,6 +128,7 @@ void UFluidNinjaWaterBirdComponent::BeginPlay()
 		Mesh = FindMesh();
 	}
 	LoadSplash();
+	LoadPlunge();
 	Bind(Mesh);
 	SetComponentTickEnabled(bContactsEnabled);
 }
@@ -214,10 +215,14 @@ void UFluidNinjaWaterBirdComponent::Bind(USkeletalMeshComponent* InMesh)
 	PartOffsets.Init(FVector::ZeroVector, Count);
 	States.Init(FPartState(), Count);
 	Depths.Init(FluidNinjaWaterBird::NoDepthCm, Count);
-	// The deepest depths are QA's, reset by Reset Peak Depths: kept while the list keeps its length.
+	// The deepest depths are QA's, reset by Reset Peak Depths, and the entry speeds too: kept while the list keeps its length.
 	if (PeakDepths.Num() != Count)
 	{
 		PeakDepths.Init(FluidNinjaWaterBird::NoDepthCm, Count);
+	}
+	if (EntrySpeeds.Num() != Count)
+	{
+		EntrySpeeds.Init(0.f, Count);
 	}
 	if (!InMesh || !Asset)
 	{
@@ -244,6 +249,17 @@ void UFluidNinjaWaterBirdComponent::LoadSplash()
 	{
 		UE_LOG(LogFluidNinjaBuoyancy, Warning, TEXT("FluidNinja Water Bird on %s: Splash System %s did not load; this bird makes no splashes."),
 			*GetNameSafe(GetOwner()), *LoadedSplashPath.ToString());
+	}
+}
+
+void UFluidNinjaWaterBirdComponent::LoadPlunge()
+{
+	LoadedPlungePath = PlungeSplashSystem.ToSoftObjectPath();
+	LoadedPlunge = PlungeSplashSystem.LoadSynchronous();
+	if (!LoadedPlungePath.IsNull() && !LoadedPlunge)
+	{
+		UE_LOG(LogFluidNinjaBuoyancy, Warning, TEXT("FluidNinja Water Bird on %s: Plunge Splash System %s did not load; this bird makes no plunge splash."),
+			*GetNameSafe(GetOwner()), *LoadedPlungePath.ToString());
 	}
 }
 
@@ -291,9 +307,14 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 	{
 		LoadSplash();
 	}
+	if (PlungeSplashSystem.ToSoftObjectPath() != LoadedPlungePath)
+	{
+		LoadPlunge();
+	}
 	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
 	const float Scale = OwnerScale();
 	const float MassScale = Scale * Scale * Scale;
+	SincePlunge += DeltaSeconds;
 	for (int32 Index = 0; Index < Parts.Num(); ++Index)
 	{
 		if (!PartFound[Index])
@@ -309,6 +330,10 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 			// No water known here: the part starts over where water is found again (no speed for that frame, no entry from a stale state).
 			State = FPartState();
 			Depths[Index] = FluidNinjaWaterBird::NoDepthCm;
+			if (!BodyPart.IsNone() && Part.Name == BodyPart)
+			{
+				bBodyDiving = false;
+			}
 			continue;
 		}
 		const float Depth = Water.SurfaceZ - static_cast<float>(Position.Z);
@@ -340,6 +365,11 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 		State.Momentum = Momentum;
 		State.bHasMomentum = bMoving;
 		State.Wet = Wet;
+		if (!BodyPart.IsNone() && Part.Name == BodyPart)
+		{
+			// The body diving in: still dry, coming down at plunge speed. Parts going in ahead of it leave their spray to the plunge.
+			bBodyDiving = bMoving && Wet <= 0.f && Velocity.Z < 0.0 && Velocity.Size() >= PlungeMinSpeedCmS;
+		}
 
 		// Moving along the water, a wet part with Wake pays drag, 0.5 rho Cd A v2 over the frame (kg·cm/s), pressed in ahead of it.
 		const FVector Along(Velocity.X, Velocity.Y, 0.0);
@@ -364,8 +394,22 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 			if (bMoving)
 			{
 				const float Speed = static_cast<float>(Velocity.Size());
+				const bool bBody = !BodyPart.IsNone() && Part.Name == BodyPart;
+				const bool bPlungeOn = LoadedPlunge && PlungeSplashScale > 0.f;
+				if (bEntry)
+				{
+					EntrySpeeds[Index] = Speed;
+				}
+				// A dive: the plunge splash goes first, so the frame's splash budget draws it before the parts' small ones.
+				if (bPlungeOn && bEntry && bBody && Speed >= PlungeMinSpeedCmS)
+				{
+					SendPlunge(*Subsystem, Position, Water.SurfaceZ, Water.Normal, Radius, Velocity);
+				}
+				// A dive's spray is the plunge splash: a part going in while the body dives in behind it (the beak, the head), and every part
+				// for Plunge Quiet Seconds after the plunge (the feet following the body, the surfacing), throws none of its own.
+				const bool bHeldBack = bPlungeOn && (SincePlunge < PlungeQuietSeconds || (bEntry && !bBody && bBodyDiving));
 				float Splash = 0.f;
-				if (!bSplashMissing && Speed > 0.f && Speed >= MinSplashSpeedCmS)
+				if (!bSplashMissing && !bHeldBack && Speed > 0.f && Speed >= MinSplashSpeedCmS)
 				{
 					// The slam's power on the project's splash scale, in watts: the part's momentum m v, stopped over its own size (2 r at
 					// speed v), times v.
@@ -378,7 +422,11 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 						Splash = 0.f;
 					}
 				}
-				const float Foam = bEntry && !BodyPart.IsNone() && Part.Name == BodyPart ? EntryFoamRate : 0.f;
+				else if (bHeldBack && Speed >= MinSplashSpeedCmS)
+				{
+					++HeldBack;
+				}
+				const float Foam = bEntry && bBody ? EntryFoamRate : 0.f;
 				if (FMath::Abs(State.Pending) >= FluidNinjaWaterBird::MinImpulseKgCmS || Splash > 0.f || Foam > 0.f)
 				{
 					Send(*Subsystem, Position, Water.SurfaceZ, Water.Normal, Radius, State.Pending, Splash, Foam);
@@ -430,6 +478,30 @@ void UFluidNinjaWaterBirdComponent::Send(UFluidNinjaBuoyancySubsystem& Subsystem
 		++Splashes;
 	}
 	ImpulseAbsSum += FMath::Abs(ImpulseDown);
+}
+
+void UFluidNinjaWaterBirdComponent::SendPlunge(UFluidNinjaBuoyancySubsystem& Subsystem, const FVector& Where, float SurfaceZ, const FVector& Normal,
+	float RadiusCm, const FVector& Velocity)
+{
+	// The heading: the owner's forward laid on the water; an owner pointing along the normal (straight down) has none, so the dive's own
+	// motion along the water stands in. Neither: the subsystem keeps the world's heading.
+	const FVector Up = Normal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
+	const AActor* Owner = GetOwner();
+	FVector Heading = Owner ? FVector::VectorPlaneProject(Owner->GetActorForwardVector(), Up) : FVector::ZeroVector;
+	if (Heading.SizeSquared() < 0.01)
+	{
+		Heading = FVector::VectorPlaneProject(Velocity, Up);
+	}
+	FFluidNinjaWaterContact Contact;
+	Contact.Location = FVector(Where.X, Where.Y, SurfaceZ);
+	Contact.RadiusCm = FMath::Clamp(RadiusCm, 0.5f, 200.f);
+	Contact.SplashStrength = PlungeSplashScale;
+	Contact.SplashNormal = Up;
+	Contact.SplashDirection = Heading.GetSafeNormal();
+	Contact.SplashSystem = LoadedPlunge;
+	Subsystem.AddWaterContact(Contact);
+	++Plunges;
+	SincePlunge = 0.f;
 }
 
 float UFluidNinjaWaterBirdComponent::OwnerScale() const
@@ -503,6 +575,7 @@ FString UFluidNinjaWaterBirdComponent::GetDiagnostics() const
 	FString DepthList;
 	FString PeakList;
 	FString WetList;
+	FString EntrySpeedList;
 	for (int32 Index = 0; Index < Parts.Num(); ++Index)
 	{
 		const TCHAR* Separator = Index > 0 ? TEXT(",") : TEXT("");
@@ -510,11 +583,12 @@ FString UFluidNinjaWaterBirdComponent::GetDiagnostics() const
 		DepthList += Separator + FluidNinjaWaterBird::JsonNumber(Depths.IsValidIndex(Index) ? Depths[Index] : FluidNinjaWaterBird::NoDepthCm);
 		PeakList += Separator + FluidNinjaWaterBird::JsonNumber(PeakDepths.IsValidIndex(Index) ? PeakDepths[Index] : FluidNinjaWaterBird::NoDepthCm);
 		WetList += Separator + FluidNinjaWaterBird::JsonNumber(States.IsValidIndex(Index) ? States[Index].Wet : 0.f);
+		EntrySpeedList += Separator + FluidNinjaWaterBird::JsonNumber(EntrySpeeds.IsValidIndex(Index) ? EntrySpeeds[Index] : 0.f);
 	}
-	return FString::Printf(TEXT("{\"water_contacts\":%s,\"water_entries\":%d,\"water_exits\":%d,\"contacts\":%d,\"splashes\":%d,")
-		TEXT("\"water_readback_fallbacks\":%d,\"impulse_abs_sum_kg_cm_s\":%s,\"part_names\":[%s],\"depth_cm\":[%s],\"peak_depth_cm\":[%s],")
-		TEXT("\"wet_fraction\":[%s],\"float_body_above_water_cm\":%s,\"heave_frequency_hz\":%s}"),
-		bContactsEnabled ? TEXT("true") : TEXT("false"), Entries, Exits, Contacts, Splashes, ReadbackFallbacks,
-		*FluidNinjaWaterBird::JsonNumber(ImpulseAbsSum), *Names, *DepthList, *PeakList, *WetList,
+	return FString::Printf(TEXT("{\"water_contacts\":%s,\"water_entries\":%d,\"water_exits\":%d,\"contacts\":%d,\"splashes\":%d,\"plunges\":%d,")
+		TEXT("\"splashes_held_back\":%d,\"water_readback_fallbacks\":%d,\"impulse_abs_sum_kg_cm_s\":%s,\"part_names\":[%s],\"depth_cm\":[%s],")
+		TEXT("\"peak_depth_cm\":[%s],\"wet_fraction\":[%s],\"entry_speed_cm_s\":[%s],\"float_body_above_water_cm\":%s,\"heave_frequency_hz\":%s}"),
+		bContactsEnabled ? TEXT("true") : TEXT("false"), Entries, Exits, Contacts, Splashes, Plunges, HeldBack, ReadbackFallbacks,
+		*FluidNinjaWaterBird::JsonNumber(ImpulseAbsSum), *Names, *DepthList, *PeakList, *WetList, *EntrySpeedList,
 		*FluidNinjaWaterBird::JsonNumber(GetFloatBodyAboveWaterCm()), *FluidNinjaWaterBird::JsonNumber(GetHeaveFrequencyHz()));
 }

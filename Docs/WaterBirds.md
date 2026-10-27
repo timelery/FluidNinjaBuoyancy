@@ -36,7 +36,9 @@ into:
   two wave cells;
 - a ring in the surface material's ring layer (the short ripples the grid is too coarse for, [The ring layer](#the-ring-layer));
 - a splash, when the part crossed the surface fast;
-- a little foam, for the body's entry.
+- a little foam, for the body's entry;
+- for a dive (the body going in fast), the **plunge splash**: one bigger splash facing the bird's heading
+  ([The plunge splash](#the-plunge-splash)).
 
 The component moves nothing. The movement that floats the bird reads **Get Float Body Above Water Cm** and **Get Heave Frequency Hz**
 to hold the body on its waterline ([Floating the bird](#floating-the-bird)). It also presses no standing hollow: a resting bird's
@@ -89,6 +91,8 @@ the rest still works.
    Switching them on starts every part over: a bird switched on while already in the water makes no entry splash.
 6. **Splash System**: a small droplet spray suits a bird. Empty uses the project's Splash System (Project Settings → FluidNinja
    Buoyancy → Effects). A path that fails to load gives no splashes at all, with a warning in the log, rather than someone else's.
+7. **Plunge Splash System** (optional), for a bird that dives: the big splash its body throws going in, with **Plunge Min Speed Cm
+   S** between its landings and its dives ([The plunge splash](#the-plunge-splash)).
 
 **Finding a reference point.** Reference Point is the part's centre in the mesh's component space with the mesh in its reference
 pose (cm, Unreal's axes as imported): read it from the modelling package's rest pose (converted to Unreal's axes and
@@ -164,6 +168,33 @@ What the defaults give a pelican-sized bird (Splash Scale 0.6, Splash Reference 
 13 m/s, 3.5 kW, a splash of 2.2; the body (2.5 kg, 13 cm) at 8 m/s, 4.9 kW, 2.5. For a finer spray lower Splash Scale, or a part's
 own Splash Scale.
 
+### The plunge splash
+
+A diving bird throws far more than droplets: sheets of water rise either side of its path and break into spray at their rims. The
+parts' splashes are spawned facing the world, scaled by each part's slam, and come from every part, a foot's pat included; the
+plunge splash is one effect for the whole dive:
+
+- **When**: the Body Part's entry at **Plunge Min Speed Cm S** or faster (world speed, default 600 cm/s), once per entry, with
+  **Plunge Splash System** set and loaded. Set the threshold between the bird's gentle entries (landing, settling) and its dives:
+  `entry_speed_cm_s` in the diagnostics lists each part's last entry speed.
+- **Where**: on the surface at the body's (x, y).
+- **Which way**: the system's Z is the water's normal and its +X the owner's forward laid on the water (the body's motion along the
+  water when the owner points straight down), so a system that builds its sheets along ±Y puts them either side of the bird. The
+  contact's **Splash Direction** carries the heading (Add Water Contact).
+- **How big**: **Plunge Splash Scale** (default 1, the system at its own size), not scaled by the speed: a dive's splash is an art
+  piece, and its size is the system's.
+- **The parts' own splashes** are held back around a dive, while a Plunge Splash System is set: the plunge splash is the dive's
+  spray, and the parts' droplet bursts scattered over it read as clutter.
+  - **Ahead of the body:** a part going in while the body, still above the water, comes down at Plunge Min Speed Cm S or faster
+    (the beak and head of a diving bird).
+  - **After the plunge:** every part, entries and exits, for **Plunge Quiet Seconds** (default 0.6 s): the feet going in behind the
+    body, the surfacing.
+
+  Landings, paddling, dips and take-offs splash as before. Speed alone cannot tell these apart: a pelican's feet go in at
+  570-590 cm/s behind a diving body and at up to 575 cm/s running on the water to take off.
+- It is sent before the body's own contact, so a busy frame's splash budget (`fnb.Effects.SplashBudgetPerFrame`) spends itself on
+  it first. It carries no impulse or foam: the body's own contact still makes the rings.
+
 ---
 
 ## The ring layer
@@ -222,6 +253,9 @@ height above the root, the root sits that height less Get Float Body Above Water
 | You see | Change |
 |---|---|
 | Splashes too big or too many | **Splash Scale**, a part's **Splash Scale**, **Min Splash Speed Cm S** |
+| A dive throws no plunge splash, or a landing throws one | **Plunge Min Speed Cm S** against `entry_speed_cm_s` |
+| The plunge splash too big or small | **Plunge Splash Scale**, or the system itself |
+| Droplet bursts on top of a dive's plunge splash | **Plunge Quiet Seconds** up; `splashes_held_back` counts what was held back |
 | Rings too weak or too strong overall | the parts' **Added Mass Kg**; the project's **Wave Ring Strength** (rings only) or **Wave Impulse Scale** (grid and rings) |
 | The ring table full, rings cut short | **Wake Interval Seconds** or **Ring Interval Seconds** up, or `fnb.Waves.RingsMax` |
 | A dive's rings too steep or too faint | the project's **Wave Ring Max Slope** |
@@ -245,11 +279,14 @@ height above the root, the root sits that height less Get Float Body Above Water
 | `water_entries`, `water_exits` | Entries and exits of moving parts since Begin Play (also Get Entries / Get Exits). |
 | `contacts` | Contacts sent to the subsystem (Get Contacts). |
 | `splashes` | Contacts sent with a splash of strength 0.2 or more (Get Splashes); the budget may leave some undrawn. |
+| `plunges` | Plunge splashes sent (Get Plunges). |
+| `splashes_held_back` | Parts' splashes held back around a dive (ahead of the diving body, or within Plunge Quiet Seconds after a plunge). |
 | `water_readback_fallbacks` | Samples where the waves' readback was over 0.5 s old and the still water stood in. |
 | `impulse_abs_sum_kg_cm_s` | The sum of every sent impulse's size. |
 | `part_names` | The parts, in order; the arrays below follow it. |
 | `depth_cm`, `peak_depth_cm` | Each part's depth now and its deepest since Reset Peak Depths (−10000: not measured). |
 | `wet_fraction` | Each part's wet fraction now. |
+| `entry_speed_cm_s` | Each part's speed at its last entry while moving (0: none yet): what Plunge Min Speed Cm S is set against. |
 | `float_body_above_water_cm`, `heave_frequency_hz` | The two floating functions' values. |
 
 In C++, **GetDepths** and **GetPeakDepths** return the arrays; call **Reset Peak Depths** before a move to read how deep it went.
@@ -263,6 +300,8 @@ In C++, **GetDepths** and **GetPeakDepths** return the arrays; call **Reset Peak
 - Splashes counted but none seen: the splash budget spent that frame, or a splash system too small to read at that strength.
 - No splashes counted: the parts cross slower than Min Splash Speed Cm S or throw under strength 0.2, or the component's Splash System
   failed to load (a warning names it).
+- No plunges counted on a dive: the body's `entry_speed_cm_s` is under Plunge Min Speed Cm S, Plunge Splash Scale is 0, or the
+  Plunge Splash System is empty or failed to load (a warning names it).
 - `water_readback_fallbacks` climbing every frame: the waves' readback is stale (a hitch, a simulation switched off); the contacts
   run on the still water.
 - Nothing sent at a very low frame rate: a frame longer than 0.2 s gives no speed (it is taken for a hitch), so under about 5 fps

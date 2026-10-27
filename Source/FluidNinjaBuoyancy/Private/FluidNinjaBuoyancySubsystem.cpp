@@ -4825,7 +4825,11 @@ void UFluidNinjaBuoyancySubsystem::AddWaterContact(const FFluidNinjaWaterContact
 		if (System && FluidNinjaBuoyancy::TakeSharedSplashBudget(0))
 		{
 			const FVector Up = Contact.SplashNormal.ContainsNaN() ? FVector::UpVector : Contact.SplashNormal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, System, Contact.Location, FRotationMatrix::MakeFromZ(Up).Rotator(), FVector(Contact.SplashStrength),
+			// Facing: the system's +X along Splash Direction laid on the water, when there is one.
+			const FVector Along = Contact.SplashDirection.ContainsNaN() ? FVector::ZeroVector : FVector::VectorPlaneProject(Contact.SplashDirection, Up);
+			const FRotator Facing = Along.SizeSquared() > UE_KINDA_SMALL_NUMBER ? FRotationMatrix::MakeFromZX(Up, Along).Rotator()
+				: FRotationMatrix::MakeFromZ(Up).Rotator();
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, System, Contact.Location, Facing, FVector(Contact.SplashStrength),
 				true, true, ENCPoolMethod::AutoRelease);
 			INC_DWORD_STAT(STAT_FNB_SplashSpawns);
 		}
