@@ -228,4 +228,94 @@ public:
 	 * the project's splash scale). Default 1; at least 0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spray", meta = (ClampMin = "0"))
 	float SplashScale = 1.f;
+
+	/** Written to the component's Spray Sheets: whisker sheets off the chines and a rooster tail while the hull drives fast. Default off;
+	 * the Motorboat preset turns it on. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spray")
+	bool bSpraySheets = false;
+
+	/** Written to the component's Spray Deadrise Deg: the bottom's V, which sets how fast the whisker sheets leave (2 V sin of the
+	 * deadrise). Default 18; range 0-45. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spray", meta = (ClampMin = "0", ClampMax = "45"))
+	float SprayDeadriseDeg = 18.f;
+
+	/** Written to the component's Hull Flow: Displacement (Kerner's drag; every shipped preset but Motorboat) or Planing (the planing law,
+	 * a ventilated transom and the hull's wave-making resistance: a fast hull rises onto the plane). Default Displacement. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat")
+	EFluidNinjaHullFlow HullFlow = EFluidNinjaHullFlow::Displacement;
+
+	/** Written to the component's Planing Pressure Coefficient (k of the planing law, p = k half rho V^2 cos). Default 0.6; range 0.1-1.5. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat",
+		meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0.1", ClampMax = "1.5"))
+	float PlaningPressureCoefficient = 0.6f;
+
+	/** Also give the body a propeller: the component's Propulsion is turned on with the settings below (Console Control off), the
+	 * propeller placed by Prop Location Share. Off: the component's propulsion is left as it is. Default off; the Motorboat preset turns
+	 * it on. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat")
+	bool bSetPropulsion = false;
+
+	/** Written to the component's Propulsion Model: Propeller (an engine turning a propeller through a gear) or Simple (a fixed thrust).
+	 * Default Propeller. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion"))
+	EFluidNinjaPropulsionModel PropulsionModel = EFluidNinjaPropulsionModel::Propeller;
+
+	/** Written to the component's Engine Power Kw, the power at the rev limit. Default 60 (an 80 hp outboard); range 1-2000. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "1", ClampMax = "2000"))
+	float EnginePowerKw = 60.f;
+
+	/** Written to the component's Engine Max Rpm, the rev limit. Default 5800; range 1000-15000. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "1000", ClampMax = "15000"))
+	float EngineMaxRpm = 5800.f;
+
+	/** Written to the component's Gear Ratio (engine turns per propeller turn). Default 2; range 0.25-10. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "0.25", ClampMax = "10"))
+	float GearRatio = 2.f;
+
+	/** Written to the component's Prop Diameter Cm. Default 28 (an 11 in outboard propeller); range 5-300. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "5", ClampMax = "300"))
+	float PropDiameterCm = 28.f;
+
+	/** Written to the component's Prop Pitch Ratio (pitch over diameter: higher is a faster, harder-to-turn propeller). Default 1.3;
+	 * range 0.4-2. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "0.4", ClampMax = "2"))
+	float PropPitchRatio = 1.3f;
+
+	/** Written to the component's Steerable Thrust: an outboard or sterndrive whose thrust turns with the rudder. Off: a fixed shaft with
+	 * a rudder behind it. Default on. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion"))
+	bool bSteerableThrust = true;
+
+	/** Where the propeller goes (the component's Thrust Location and Rudder Location): shares of the mesh's half extents from the centre of
+	 * its bounds, along X (-1 the stern; the bow is +X), Y and Z (-1 the bottom). Beyond 1 places it outside the bounds: an outboard's
+	 * propeller hangs behind the transom and under the keel, about (-1.05, 0, -1.6) on a runabout. Default (-1.05, 0, -1.6). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion"))
+	FVector PropLocationShare = FVector(-1.05, 0.0, -1.6);
+
+	/** Written to the component's Rudder Area Cm2: the side force of the lower unit or rudder. Default 500; at least 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "0"))
+	float RudderAreaCm2 = 500.f;
+
+	/** Written to the component's Max Rudder Angle, in degrees. Default 30; range 0-60. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "bSetPropulsion", ClampMin = "0", ClampMax = "60"))
+	float MaxRudderAngle = 30.f;
+
+	/** Written to the component's Keel Area Cm2 by every preset, whatever Set Propulsion says: the hull's lateral plane under the water
+	 * that resists sliding sideways (keel, skeg, pump housing, strakes); more area, less slide in the turns. 0 (the default) turns the
+	 * component's keel off, as floating props want; the Motorboat preset uses 2000. A jet ski 1000-2000; a 5 m runabout 1500-3000; an
+	 * 8 m RIB 4000-8000. At least 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (ClampMin = "0"))
+	float KeelAreaCm2 = 0.f;
+
+	/** Where the keel's side force acts (the component's Keel Location, the hull's centre of lateral resistance): shares of the mesh's
+	 * half extents from the centre of its bounds, as Prop Location Share (X -1 the stern, the bow is +X; Z -1 the bottom). Aft of the
+	 * centre of mass it also keeps the boat running straight. Default (-0.35, 0, -1): on the keel line about a third of the length from
+	 * the stern. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (EditCondition = "KeelAreaCm2 > 0"))
+	FVector KeelLocationShare = FVector(-0.35, 0.0, -1.0);
+
+	/** Written to the component's Keel Depth Cm: the keel's vertical span, centred on Keel Location Share's point. A jet ski or runabout
+	 * 10-20; an 8 m RIB 20-30. Default 15; at least 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motorboat", meta = (ClampMin = "1"))
+	float KeelDepthCm = 15.f;
 };

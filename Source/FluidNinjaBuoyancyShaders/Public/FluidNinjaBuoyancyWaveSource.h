@@ -116,6 +116,14 @@ namespace FluidNinjaBuoyancyWaveSource
 		/** Names the simulation from frame to frame (never 0): its summed deep heads are kept on the GPU and reused while its records stay
 		 * the same (a sunk body at rest costs no dispatch). */
 		uint32 DeepKey = 0;
+		/** FluidNinja Waves interface version 6: the simulation has a wash texture (User.WaveWashTexture, W x H RGBA16F on these cells), written
+		 * here with the source: R the fresh and G the aged foam rates the bodies wash in (Washes: two float4 each, (x, y grid-relative cm,
+		 * σ cm, 0) then (fresh rate, aged rate, 0, 0), per second), B the steady part of this write's impulse head y (the impulses whose
+		 * area is negative: a planing hull's steady pressure, which the core's impact foam leaves out), A 0. WashTarget is set on the
+		 * render thread. */
+		bool bWash = false;
+		FRHITexture* WashTarget = nullptr;
+		TArray<FVector4f> Washes;
 	};
 
 	/** One body's self field this frame. */
@@ -203,6 +211,8 @@ namespace FluidNinjaBuoyancyWaveSource
 		FRHITexture* Atlas = nullptr;
 		bool bControlled = false;
 		float ControlledHeight = 0.f;
+		/** Vertical lines per cell in the hull raster (Wave Raster Lines): the nearest of 1, 4, 8, 16 and 32 is used (SupportedRasterLines). */
+		int32 RasterLines = 16;
 		float Gravity = 980.f;
 		/** kg/cm³. */
 		float Density = 0.001f;
@@ -271,4 +281,7 @@ namespace FluidNinjaBuoyancyWaveSource
 
 	/** Render thread: one frame of the wave sources (sources, self fields, probes and stats). */
 	FLUIDNINJABUOYANCYSHADERS_API void Enqueue(FRHICommandListImmediate& RHICmdList, FState& State, const FFrame& Frame);
+
+	/** The hull raster's lines per cell for a wanted count: the nearest of the compiled ones (1, 4, 8, 16, 32), ties to the larger. */
+	FLUIDNINJABUOYANCYSHADERS_API int32 SupportedRasterLines(int32 Lines);
 }

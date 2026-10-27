@@ -203,8 +203,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "FNB Dev|Graph")
 	static FString SetModuleUsageBitmask(UNiagaraScript* Script, int32 Bitmask);
 
-	/** Compiles a material or material instance (its static permutation) into a resource of its own for Windows SM6, synchronously
-	 * (works in commandlets, which keep no rendering resources), and returns "OK" or "ERRORS: ..." with the compile errors. */
+	/** Compiles a material or material instance and returns "OK" or "ERRORS: ..." with the compile errors. In a live editor, uses
+	 * the normal material editor update path and reads the asset-owned resource after compilation; never destroys a scratch resource.
+	 * Commandlets retain the separate synchronous Windows SM6 compilation path because they keep no rendering resources. */
 	UFUNCTION(BlueprintCallable, Category = "FNB Dev|Material")
 	static FString CompileMaterialErrors(UMaterialInterface* Material);
 

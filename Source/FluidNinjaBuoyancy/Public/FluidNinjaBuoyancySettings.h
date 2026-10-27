@@ -5,6 +5,8 @@
 #include "Templates/SubclassOf.h"
 #include "FluidNinjaBuoyancySettings.generated.h"
 
+class UTexture;
+
 /** FluidNinja Waves overrides for one simulation (one entry of Wave Sims), found by its NinjaLive actor's name or label. Each override has
  * its own tick box; an unticked field takes the project's Waves setting. */
 USTRUCT()
@@ -75,6 +77,106 @@ struct FFluidNinjaWaveSimSettings
 	UPROPERTY(EditAnywhere, Category = "Waves", meta = (EditCondition = "bOverrideNormalScale", ClampMin = "0"))
 	float NormalScale = 0.1f;
 
+	/** Use Current Coupling for this simulation instead of the project's Wave Current Coupling. */
+	UPROPERTY(EditAnywhere, Category = "Waves", meta = (InlineEditConditionToggle))
+	bool bOverrideCurrentCoupling = false;
+
+	/** How much FluidNinja's current carries this simulation's waves and foam, instead of the project's Wave Current Coupling. A river needs
+	 * 1 (its waves and foam go down it with the water). In still water the only current is what the bodies stir, and a fast boat's own
+	 * stirring can drag its wake foam sideways and bend its quarter wakes toward its track: lower keeps the wake's shape (0.2-0.5), 0 leaves
+	 * waves and foam where they were made. Default 1. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Waves", meta = (EditCondition = "bOverrideCurrentCoupling", ClampMin = "0"))
+	float CurrentCoupling = 1.f;
+
+	/** Use Damping for this simulation instead of the project's Wave Damping. */
+	UPROPERTY(EditAnywhere, Category = "Waves", meta = (InlineEditConditionToggle))
+	bool bOverrideDamping = false;
+
+	/** How fast this simulation's waves lose their energy (User.Wave.Damping, 1/s), instead of the project's Wave Damping (0.02: an e-fold
+	 * in 50 s, as open water). The waves a boat leaves behind are what catch up with it and keep slopping round it after it stops, while
+	 * the wake seen behind a moving boat is only a second or two old, so a higher rate mostly takes the old waves: at 0.2 the arms two
+	 * lengths behind a fast boat keep about 80 % of their height and waves 10 s old 14 %. The bodies' own fields take the same rate, so
+	 * the bodies still feel only the waves others make. Higher: calmer water sooner after a boat stops; 0: no damping. Default 0.02; at
+	 * least 0; 0.1-0.3 for a basin whose boats should settle in a few seconds. */
+	UPROPERTY(EditAnywhere, Category = "Waves", meta = (EditCondition = "bOverrideDamping", ClampMin = "0"))
+	float Damping = 0.02f;
+
+	/** Use FoamDecay for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamDecay = false;
+
+	/** How fast this simulation's white foam fades (User.Wave.FoamDecay, 1/s), instead of the project's Foam Decay: 0.7 is an e-fold in
+	 * about 1.4 s; lower leaves longer white trails (a fast boat's wake stays white for tens of metres at 0.3). Default 0.7. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamDecay", ClampMin = "0"))
+	float FoamDecay = 0.7f;
+
+	/** Use FoamAgedDecay for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamAgedDecay = false;
+
+	/** How fast this simulation's aged foam (the pale trail) fades (User.Wave.FoamAgedDecay, 1/s), instead of the project's Foam Aged
+	 * Decay: 0.02 is an e-fold in 50 s. Higher: shorter pale trails. Default 0.02. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamAgedDecay", ClampMin = "0"))
+	float FoamAgedDecay = 0.02f;
+
+	/** Use FoamWake for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamWake = false;
+
+	/** Scale of the foam a moving hull's waterline sheds in this simulation (User.Wave.FoamWake), instead of the project's Foam Wake:
+	 * the core's own bow and side foam. A basin whose boats draw their whitewater from their own Wake settings (Prop Wash Foam, Quarter Wake
+	 * Foam) wants less (0.1-0.3), or the waterline foam rings the bow and fills the dark lanes. Default 1. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamWake", ClampMin = "0"))
+	float FoamWake = 1.f;
+
+	/** Use FoamTransfer for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamTransfer = false;
+
+	/** The share of this simulation's white foam's fading that becomes aged foam (User.Wave.FoamTransfer), instead of the project's Foam
+	 * Transfer. Lower keeps the dark water between a wake's white bands dark; 0 makes aged foam only from the wash. Default 0.5. Range 0-1. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamTransfer", ClampMin = "0", ClampMax = "1"))
+	float FoamTransfer = 0.5f;
+
+	/** Use FoamDiffusion for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamDiffusion = false;
+
+	/** How fast this simulation's white foam spreads (User.Wave.FoamDiffusion, cm²/s), instead of the project's Foam Diffusion: a trail
+	 * widens by about √(4 D t). Lower keeps whitewater crisp and its lanes sharp (10); higher softens it. Default 30. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamDiffusion", ClampMin = "0"))
+	float FoamDiffusion = 30.f;
+
+	/** Use FoamAgedDiffusion for this simulation instead of the project's. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (InlineEditConditionToggle))
+	bool bOverrideFoamAgedDiffusion = false;
+
+	/** How fast this simulation's aged foam spreads (User.Wave.FoamAgedDiffusion, cm²/s), instead of the project's Foam Aged Diffusion:
+	 * 200 adds about 2 m to a pale trail in a minute. Lower keeps it narrow (50). Default 200. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Foam", meta = (EditCondition = "bOverrideFoamAgedDiffusion", ClampMin = "0"))
+	float FoamAgedDiffusion = 200.f;
+
+	/** Scalar parameters set on this simulation's surface materials, by name: its own look on a FluidNinja material other water shares,
+	 * without editing the material (the plugin sets them on the surfaces' dynamic materials about once a second, beside WaveNormalScale).
+	 * For the whitewater: WaveFoamLace (0-1, how much the foam breaks into lace), WaveFoamLaceTileCm (the lace's size, 100-1000 cm),
+	 * WaveFoamAgedStrength (0-1, the pale trail), WaveFoamStrength. For the wind sea: WaveWindSeaStrength (the wavelets' slope, default 1),
+	 * and the material's own Specular (FluidNinja's water materials; 0.25 is physical water, Murky ships 0.15): a bright, murky water shows
+	 * its ripples from above only through its reflection, so a higher Specular (0.5-1) lets a wind sea read from a drone height. A name the
+	 * material lacks is skipped. Empty by default. */
+	UPROPERTY(EditAnywhere, Category = "Surface")
+	TMap<FName, float> SurfaceScalars;
+
+	/** Colour parameters set on this simulation's surface materials, by name, as Surface Scalars: WaveFoamColor (above 1 brightens the
+	 * foam: 1.3 reads white on murky water), WaveFoamAgedColor. A name the material lacks is skipped. Empty by default. */
+	UPROPERTY(EditAnywhere, Category = "Surface")
+	TMap<FName, FLinearColor> SurfaceColors;
+
+	/** Texture parameters set on this simulation's surface materials, by name, as Surface Scalars: WaveFoamLaceTexture (its red channel
+	 * breaks the foam into lace; FluidNinja's T_Crumple_MultiLevel gives whitewater's bubbly clumps, T_foam2 thin streaks). A name the
+	 * material lacks, or a texture that does not load, is skipped. Empty by default. */
+	UPROPERTY(EditAnywhere, Category = "Surface")
+	TMap<FName, TSoftObjectPtr<UTexture>> SurfaceTextures;
+
 	/** The wave grid's scale-down for this simulation, S = 1, 2 or 4 (User.Wave.ScaleDown): its waves run on its pressure buffer's cells over
 	 * S, cells S pressure cells wide, so a tick costs 1 / S² of what it does at 1 and each body's own field spans S times the water for the
 	 * same cost; the coarser cells drop the shortest waves, and a change starts the waves afresh. 0 (the default): the console variable
@@ -90,6 +192,54 @@ struct FFluidNinjaWaveSimSettings
 	 * runs and this does nothing. */
 	UPROPERTY(EditAnywhere, Category = "Waves", meta = (ClampMin = "0.01"))
 	float Importance = 1.f;
+
+	/** The wind sea on this simulation: the significant height (the mean of the highest third of the waves, crest to trough) of the fine,
+	 * short-crested wind waves on its open water, in cm. 0 (the default) turns it off. It is an incident sea anchored in the world, drawn on
+	 * top of everything the simulation makes: the waves its grid can carry (Wind Sea Wavelength and longer, down to fnb.Waves.WindSeaSplitCells
+	 * texels) are added to its wave height, so floating bodies feel them; the shorter wavelets are drawn by the surface material
+	 * (WaveWindSeaStrength scales their slope). The boats' waves, wakes and foam are untouched: the sea adds to them, and it makes no foam.
+	 * 2-4 cm is a light breeze on a lake, 5-8 a fresh one, 10-20 a choppy sea; above 30 the linear waves look smooth rather than steep.
+	 * Needs Waves on and a core at interface version 7 (the windsea step); an older core ignores it. Console: fnb.Waves.WindSea 0 turns
+	 * every wind sea off. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (ClampMin = "0", UIMax = "30", Units = "cm"))
+	float WindSeaHeightCm = 0.f;
+
+	/** The wind sea's peak wavelength, cm: the length of its most energetic waves (a JONSWAP spectrum around it, from twice this down to
+	 * 10 cm wavelets). Longer: a heavier, longer swell under the chop and more of it felt by the bodies; shorter: a finer, busier chop that is
+	 * mostly drawn wavelets. A young sea on a lake peaks at 0.5-2 m, a fresh breeze over open water at 2-5 m. Default 120. At least 15. A
+	 * change rebuilds the sea (new random phases). */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (ClampMin = "15", UIMin = "30", UIMax = "600", Units = "cm"))
+	float WindSeaWavelengthCm = 120.f;
+
+	/** How widely the wind sea's waves spread around its heading: the rms angle of their directions (a cos^2s spreading), in degrees.
+	 * Lower: long-crested, parallel waves running one way; higher: short-crested, confused chop. A wind sea spreads about 25-40 degrees.
+	 * Default 30. Range 1-90. A change rebuilds the sea. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (ClampMin = "1", ClampMax = "90", Units = "Degrees"))
+	float WindSeaSpreadDegrees = 30.f;
+
+	/** The wind sea runs the way the wind blows (FluidNinja Buoyancy's wind: the project's Wind, or a project's own wind source, such as a weather system):
+	 * on (the default), its heading follows the wind while the wind is above 0.5 m/s, and keeps its last heading in a calm; off, it runs
+	 * toward Wind Sea Direction Degrees always. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea")
+	bool bWindSeaFollowsWind = true;
+
+	/** The way the wind sea runs (world yaw, degrees: 0 toward +X, 90 toward +Y) when it does not follow the wind, or before any wind
+	 * blows. Default 0. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (Units = "Degrees"))
+	float WindSeaDirectionDegrees = 0.f;
+
+	/** The wind speed, m/s, at which the wind sea has its full Wind Sea Height Cm: above 0 its height scales with the wind's speed over
+	 * this (at most twice the height), so a calm leaves the water flat and a gust roughens it; 0 (the default) keeps the height whatever the
+	 * wind. 4-8 m/s is a fresh breeze. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (ClampMin = "0", DisplayName = "Wind Sea Reference Wind (m/s)"))
+	float WindSeaReferenceWindMs = 0.f;
+
+	/** How fast the wind sea follows the wind, s: its heading and height approach what the wind asks for with this time constant (a real
+	 * sea takes minutes to veer), and it never turns faster than 3 degrees a second (the field turns about a point near the simulation, so a
+	 * fast turn would sweep distant waves sideways). Lower follows gusts sooner; 0 follows at once (still at most 3 degrees a second).
+	 * Default 20. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Wind Sea", meta = (ClampMin = "0", Units = "s"))
+	float WindSeaResponseSeconds = 20.f;
 };
 
 /**
@@ -365,6 +515,17 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Effects", meta = (AllowedClasses = "/Script/Engine.SoundAttenuation"))
 	FSoftObjectPath HullAttenuation;
 
+	/** The spray sheets' Niagara system (bodies with Spray Sheets on and no Spray Sheet System of their own): the whisker sheets off a fast
+	 * hull's chines and the rooster tail. It must take the user parameters SprayRate, SprayVelocity, SprayCone, DropletSize and WaterZ.
+	 * Default the plugin's NS_FNB_HullSpray. Empty: no sheets. */
+	UPROPERTY(config, EditAnywhere, Category = "Effects", meta = (AllowedClasses = "/Script/Niagara.NiagaraSystem"))
+	FSoftObjectPath SpraySheetSystem;
+
+	/** The engine loop for propeller-driven bodies without an Engine Sound of their own; its MetaSound inputs RPM, Load, Throttle,
+	 * Ventilated and Speed are kept up to date. None ships with the plugin; empty: no engine sound. */
+	UPROPERTY(config, EditAnywhere, Category = "Effects", meta = (AllowedClasses = "/Script/Engine.SoundBase"))
+	FSoftObjectPath EngineSound;
+
 	/** FluidNinja Waves: floating bodies and the swimmer make real water waves in FluidNinja's own simulation (the modified NinjaLiveCore
 	 * runs a wave field beside its fluid, on its pressure buffer's cells): each body's static head (how deep its hull sits below the
 	 * wave-free surface) and the impulses of the slam and drag that stop it, written each frame into a source texture per simulation
@@ -437,6 +598,20 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves", ClampMin = "0"))
 	float WaveHyperviscosity = 0.5f;
 
+	/** How many vertical lines test each cell when a hull is drawn into the waves: its static head P is the mean head over them, so a
+	 * hull's edge fills a cell as it moves across it. 1, 4, 8, 16 or 32; any other value takes the nearest of those (ties the larger:
+	 * 12 runs 16). With 1, the line through the cell's centre, a hull whose side stands upright under the water (a RIB's tubes, a jetski's
+	 * or a motorboat's sides) puts the side's whole depth into a cell the moment the line meets it and nothing the moment it leaves: a
+	 * resting RIB drifting a fraction of a cell flipped the cells along its tubes between 0 and 14-22 cm, and as the surface draws
+	 * B = η + P every flip stood up at the waterline as a spike that rang ±15-20 cm and broke into foam. With N lines a flip is an Nth of
+	 * that (16: about 1.3 cm on the RIB, 32: about 0.6 cm). More lines: smoother edges, at a raster cost that grows with the count for the
+	 * triangles near each cell. Default 32, the Epic and Cinematic quality; the lower tiers cap it with fnb.Waves.MaxRasterLines (High 16,
+	 * Medium and Low 8), so a lower value set here holds on every tier. 1 for A/B against the old raster. The bodies' own fields use the
+	 * same count, so they keep cancelling the bodies' own waves. Takes effect on the next frame, in Play too; the Output Log notes each
+	 * change. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves", ClampMin = "1", ClampMax = "32", UIMin = "1", UIMax = "32"))
+	int32 WaveRasterLines = 32;
+
 	/** How much FluidNinja's current carries the waves (User.Wave.CurrentCoupling): 1 sweeps them down the creek with the water, 0 leaves
 	 * them in still water. Default 1. At least 0; above 1 carries them faster than the water. */
 	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves", ClampMin = "0"))
@@ -491,12 +666,52 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveImpulse", ClampMin = "0"))
 	float WaveImpulseScale = 0.35f;
 
+	/** Scales a planing hull's steady pressure as a wave source (bodies with Hull Flow Planing). Its dynamic push is split by what drives
+	 * it: the part its forward motion drives (the planing lift that holds it up as it rises out of the water) goes in at this scale, the
+	 * part its heave drives (and every slam) at Wave Impulse Scale. 1 (the default) is physical: the wake then keeps the whole weight's
+	 * worth of displacement as the static head shrinks with the rise, so a fast hull's wake keeps its height; lower makes a planing hull's
+	 * wake smaller than its weight says. The steady part makes no impact foam (the propeller's and the stern's wash make the trail).
+	 * Default 1. Range 0-2. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveImpulse", ClampMin = "0", ClampMax = "2"))
+	float WavePlaningPressureScale = 1.f;
+
 	/** The impulses are spread over a Gaussian this wide (σ), or three times the σ of the piece of hull each came from if that is wider,
 	 * at most sixteen wave cells (under a quarter of a cell: bilinear between the four nearest cells). The impulse each puts in is unchanged.
 	 * Wider: lower, smoother rings; narrower: sharper ones, and an impulse pressed into too small a patch digs a pit that springs back as a
 	 * spike. Add Water Impulse spreads at least this wide too. In cm. Default 10. At least 0. */
 	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves", ClampMin = "0", Units = "cm"))
 	float WaveSourceSmoothCm = 10.f;
+
+	/** The ring layer: the fine ring ripples a small contact makes (a beak, a foot or a body going in, a dip, a take-off: Add Water Contact),
+	 * shorter than a simulation's grid can carry (a wave cell of 11.7 cm holds nothing shorter than about 47 cm). The contact's impulse is
+	 * split by wavelength: the grid gets its long waves (a Gaussian two wave cells wide at least) and the surface material draws the rest per
+	 * pixel, as the exact linear response, from each simulation's table of its recent rings (Docs/FluidNinjaWaves.md, Rings). The rings are
+	 * drawn only: the bodies do not feel them and they make no foam. Needs the surface material's WaveRingTable and WaveRingLUT (the FluidNinja
+	 * Waves material step). Default on. Off: contacts press the grid alone and the surfaces draw no rings. Console: fnb.Waves.Rings 0 turns
+	 * it off for the session (A/B); fnb.Waves.RingsMax caps the rings a simulation draws at once (default 64). */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves"))
+	bool bWaveRings = true;
+
+	/** Scales the rings' slopes (each ring's amplitude in its simulation's table; the surface material's WaveRingStrength scales them again).
+	 * 1 is physical: the linear response to the contact's impulse at Wave Impulse Scale, as the grid's share is. Higher: stronger ring
+	 * shading; lower: fainter rings; 0: none drawn. Default 1. Range 0-10. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveRings", ClampMin = "0", ClampMax = "10"))
+	float WaveRingStrength = 1.f;
+
+	/** The water's kinematic viscosity the rings decay with, cm²/s: a ripple of wavenumber k loses its height as e^(-2 ν k² t), so the
+	 * shortest ripples go first. 0.01 is clean water (capillary ripples run on for seconds); natural water with surface films damps them
+	 * sooner (0.03-0.1); higher kills the capillary ripples sooner still and leaves the longer rings. Default 0.05. Range 0.01-1. A change
+	 * works out each simulation's response table again on its next ring (once; a short hitch, its time in the log). */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveRings", ClampMin = "0.01", ClampMax = "1"))
+	float WaveRingViscosityCm2S = 0.05f;
+
+	/** The steepest slope one ring may draw outside its source (rise over run, beyond four of its band's σ plus 5 cm): each ring's amplitude
+	 * is held to it. The linear response to a surface impulse puts more energy into waves than a fast body going in really gives them (a
+	 * plunging bird's entry would draw breaking rings 10-30 cm high), so the strong contacts are capped here while gentle ones (a dip, a
+	 * paddle stroke, a footstep) keep their physical size. 0.25: a clean ring a few mm high a body length out. Lower: fainter strong rings;
+	 * higher: steeper (above about 0.4 real rings would break). Default 0.25. Range 0.02-1. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bWaveRings", ClampMin = "0.02", ClampMax = "1"))
+	float WaveRingMaxSlope = 0.25f;
 
 	/** The most impulse pieces (one per wet hull piece per physics step, all bodies) sent to the waves in a frame. Past it, each body's
 	 * neighbouring pieces pressing the same way are merged into one at their centre (in squares of a wave cell, doubled until they fit),
@@ -531,6 +746,49 @@ public:
 	 * Default 1. At least 0; 0: none. */
 	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0"))
 	float FoamImpact = 1.f;
+
+	/** The aged foam's fade (User.Wave.FoamAgedDecay, 1/s; needs a core at interface version 6): the second foam channel, the fine foam and
+	 * bubbles left after the white foam breaks up, drawn as a pale turquoise trail (the surface material's Wave Foam Aged Color) for
+	 * tens of seconds. 0.02 is an e-fold in 50 s. Higher: shorter pale trails; lower: they linger for minutes (a slick). Default 0.02. At
+	 * least 0; 0: never fades. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0"))
+	float FoamAgedDecay = 0.02f;
+
+	/** The share of the white foam's fading that becomes aged foam (User.Wave.FoamTransfer; interface version 6). Higher: every white trail
+	 * leaves a stronger pale one; 0: aged foam only from the wash (propellers, sterns, spray). Default 0.5. Range 0-1. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0", ClampMax = "1"))
+	float FoamTransfer = 0.5f;
+
+	/** How fast the white foam spreads (User.Wave.FoamDiffusion, cm²/s; interface version 6): a trail widens by about √(4 D t) (30: about
+	 * 40 cm in 15 s, though white foam lasts only a few seconds). Higher: softer, wider trails; 0: none (each cell keeps its own). The core
+	 * holds it under what its step can carry (0.2 cell² per tick). Default 30. At least 0. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0"))
+	float FoamDiffusion = 30.f;
+
+	/** How fast the aged foam spreads (User.Wave.FoamAgedDiffusion, cm²/s; interface version 6): the pale trail behind a boat widens with
+	 * age by about √(4 D t), 200 adds about 2 m in a minute. Higher: wider, fainter trails. Default 200. At least 0. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0"))
+	float FoamAgedDiffusion = 200.f;
+
+	/** The slope from which waves whiten (User.Wave.FoamSlope, rise over run; interface version 6): spilling crests foam from here, while
+	 * the waves themselves break (lose height) only past Wave Breaking Slope, so the Kelvin wake keeps its height and its first steep
+	 * crests still carry white caps. Real spilling starts at about 0.3. Lower whitens gentler crests; 0 whitens from Wave Breaking Slope
+	 * as before. Default 0.3. Range 0-2. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0", ClampMax = "2"))
+	float FoamSlope = 0.3f;
+
+	/** Scale of the whitewater washed into the foam (User.Wave.FoamWash; interface version 6). It scales the whole wash texture, so it
+	 * scales the bodies' washes (their propellers' boil, their sterns' trails and where their spray lands: each body's Prop Wash Foam,
+	 * Stern Wash Foam and Spray Landing Foam) and the patches Add Water Foam lays down alike. Higher whitens them all; lower dims them all,
+	 * for a scene whose trails read too white (to tune one body, use its own settings). Default 1. At least 0; 0: none. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0"))
+	float FoamWash = 1.f;
+
+	/** Makes the waterline foam (Foam Wake) the same per metre of hull on every grid: the core's waterline term is scaled by this over the
+	 * simulation's wave cell, so a coarser grid (a larger window, or a quality tier's scale-down) sheds as much foam per metre as this cell
+	 * size does. 0 (the default): unscaled, as before (a coarser grid sheds more). In cm; 5.86 matches a 60 m window of 1024 cells. */
+	UPROPERTY(config, EditAnywhere, Category = "Waves", meta = (EditCondition = "bWaves && bFoam", ClampMin = "0", Units = "cm"))
+	float FoamWakeReferenceCellCm = 0.f;
 
 	/** The surface material's scalar that scales the drawn wave height (MF_NinjaOutput_BaseFunction_SURFACE's WaveHeightScale): set to 0 on
 	 * the captured surfaces' dynamic materials while the Surface Mirror is drawn, so the mirror shows FluidNinja's own surface W, and put

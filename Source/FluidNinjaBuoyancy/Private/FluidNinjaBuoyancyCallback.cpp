@@ -445,7 +445,9 @@ void FFluidNinjaBuoyancyCallback::OnPreSimulate_Internal()
 				{
 					Injected += RipplePiece.Z;
 				}
-				const double ExplicitDynamicZ = Result.Force.Z - Result.BuoyancyForce.Z - Result.AirForce.Z;
+				// The propeller's, the rudder's and the keel's vertical push is not the water's dynamic push on the hull's pieces (a pitched
+				// shaft, a trimmed drive, a banked keel).
+				const double ExplicitDynamicZ = Result.Force.Z - Result.BuoyancyForce.Z - Result.AirForce.Z - Result.PropulsionForceZ;
 				const double Budget = (ExplicitDynamicZ + StableDragChangeZ + StableAddedChangeZ) * DeltaSeconds;
 				if (FMath::Abs(Injected) > 1e-6)
 				{
@@ -459,6 +461,16 @@ void FFluidNinjaBuoyancyCallback::OnPreSimulate_Internal()
 					}
 				}
 			}
+		}
+		// A planing hull's impulses leave scaled (after the budget, which holds their sum to what the body got): the steady pieces (area
+		// negative) at their own scale, the rest at Wave Impulse Scale, so the subsystem's merge never mixes the two.
+		if (BodyInput.bPreScaleImpulses)
+		{
+			for (FVector4f& RipplePiece : BodyOutput.Result.RippleImpulses)
+			{
+				RipplePiece.Z *= RipplePiece.W < 0.f ? BodyInput.SteadyImpulseScale : BodyInput.TransientImpulseScale;
+			}
+			BodyOutput.bImpulsesScaled = true;
 		}
 		if (!Force.ContainsNaN() && !Torque.ContainsNaN())
 		{

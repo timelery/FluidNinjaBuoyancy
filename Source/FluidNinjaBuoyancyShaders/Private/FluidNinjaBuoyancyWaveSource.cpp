@@ -27,6 +27,7 @@ DECLARE_GPU_STAT_NAMED(FNB_SelfMip, TEXT("FNB SelfMip"));
 DECLARE_GPU_STAT_NAMED(FNB_SelfStep, TEXT("FNB SelfStep"));
 DECLARE_GPU_STAT_NAMED(FNB_SelfExport, TEXT("FNB SelfExport"));
 DECLARE_GPU_STAT_NAMED(FNB_Probes, TEXT("FNB Probes"));
+DECLARE_GPU_STAT_NAMED(FNB_Wash, TEXT("FNB Wash"));
 DEFINE_LOG_CATEGORY_STATIC(LogFluidNinjaBuoyancyWaveSource, Log, All);
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -69,10 +70,14 @@ BEGIN_SHADER_PARAMETER_STRUCT(FFluidNinjaBuoyancyWaveSelfBatch, )
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int4>, SelfInfo)
 END_SHADER_PARAMETER_STRUCT()
 
+/** The hull raster's vertical lines per cell (FNB_WAVE_RASTER_SAMPLES in the shader): Wave Raster Lines, as SupportedRasterLines makes it. */
+class FFluidNinjaBuoyancyWaveRasterLinesDim : SHADER_PERMUTATION_SPARSE_INT("FNB_WAVE_RASTER_SAMPLES", 1, 4, 8, 16, 32);
+
 class FFluidNinjaBuoyancyWaveRasterCS : public FGlobalShader
 {
 public:
 	FNB_WAVE_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveRasterCS);
+	using FPermutationDomain = TShaderPermutationDomain<FFluidNinjaBuoyancyWaveRasterLinesDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FFluidNinjaBuoyancyWaveRasterInputs, Raster)
@@ -85,6 +90,7 @@ class FFluidNinjaBuoyancyWaveSelfRasterCS : public FGlobalShader
 {
 public:
 	FNB_WAVE_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveSelfRasterCS);
+	using FPermutationDomain = TShaderPermutationDomain<FFluidNinjaBuoyancyWaveRasterLinesDim>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FFluidNinjaBuoyancyWaveRasterInputs, Raster)
@@ -104,6 +110,8 @@ public:
 		SHADER_PARAMETER(float, ImpulseFixedScale)
 		SHADER_PARAMETER(float, SmoothCells)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ImpulseRW)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, SteadyRW)
+		SHADER_PARAMETER(int32, HasSteady)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -149,6 +157,39 @@ public:
 		SHADER_PARAMETER(int32, NumDeep)
 		SHADER_PARAMETER(float, DeepFixedScale)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, DeepOut)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+class FFluidNinjaBuoyancyWaveWashCS : public FGlobalShader
+{
+public:
+	FNB_WAVE_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveWashCS);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FFluidNinjaBuoyancyWaveGrid, Grid)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WashData)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint4>, WashInfo)
+		SHADER_PARAMETER(int32, NumWashes)
+		SHADER_PARAMETER(float, WashFixedScale)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, WashFreshRW)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, WashAgedRW)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+class FFluidNinjaBuoyancyWaveWashAssembleCS : public FGlobalShader
+{
+public:
+	FNB_WAVE_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveWashAssembleCS);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FFluidNinjaBuoyancyWaveGrid, Grid)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, WashFreshIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, WashAgedIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, SteadyIn)
+		SHADER_PARAMETER(int32, HasSteadyIn)
+		SHADER_PARAMETER(float, WashFixedScale)
+		SHADER_PARAMETER(float, ImpulseToHead)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, WashOut)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -327,6 +368,8 @@ IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveSelfSplatCS, "/Plugin/FluidNinjaB
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWavePokeCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "PokeCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveDeepHeadCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "DeepHeadCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveAssembleCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "AssembleCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveWashCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "WashCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveWashAssembleCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "WashAssembleCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveSelfShiftCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "SelfShiftCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveSelfBeginCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "SelfBeginCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveSelfResetCS, "/Plugin/FluidNinjaBuoyancy/Private/FluidNinjaBuoyancyWaveSource.usf", "SelfResetCS", SF_Compute);
@@ -339,6 +382,21 @@ IMPLEMENT_GLOBAL_SHADER(FFluidNinjaBuoyancyWaveStatsCS, "/Plugin/FluidNinjaBuoya
 
 namespace FluidNinjaBuoyancyWaveSource
 {
+	int32 SupportedRasterLines(int32 Lines)
+	{
+		// The nearest of the compiled counts, ties to the larger: 2 -> 4, 6 -> 8, 12 -> 16, 24 -> 32.
+		static constexpr int32 Counts[] = {1, 4, 8, 16, 32};
+		int32 Best = Counts[0];
+		for (const int32 Count : Counts)
+		{
+			if (FMath::Abs(Count - Lines) <= FMath::Abs(Best - Lines))
+			{
+				Best = Count;
+			}
+		}
+		return Best;
+	}
+
 	namespace
 	{
 		constexpr int32 WaveGroup = 8;           // 8 x 8 threads for the per-cell passes
@@ -356,6 +414,10 @@ namespace FluidNinjaBuoyancyWaveSource
 		/** The deep heads' fixed point: units per cm of P. A head is clamped to ±1e9 units (±15 000 cm) before it is added; the cells' sums
 		 * stay far inside int32 for any number of sinkers that fit in one place. 1/65536 cm is far below anything the waves resolve. */
 		constexpr float WaveDeepFixedScale = 65536.f;
+		/** The washes' fixed point: units per (1/s) of foam rate. A patch's rate is clamped to ±1e9 units; a cell's sum of a few hundred
+		 * patches at the rates the bodies wash in (a few per second) stays far inside uint32. */
+		constexpr float WaveWashFixedScale = 4096.f;
+		constexpr int32 WaveMaxWashes = 1024;     // wash patches per simulation (thread groups along z)
 		constexpr int32 WaveMinSelfPool = 4;     // slots a self-field pool starts with
 		// A self field's flags in SelfInfo (FluidNinjaWaveSelf* in the shader).
 		constexpr int32 WaveSelfNew = 1;
@@ -478,6 +540,7 @@ namespace FluidNinjaBuoyancyWaveSource
 		FReadback Probes[RingSize];
 		FReadback Stats[RingSize];
 		bool bWarnedTarget = false;
+		bool bWarnedWash = false;
 		bool bWarnedSelfSize = false;
 		bool bWarnedAtlas = false;
 		bool bWarnedAux = false;
@@ -646,12 +709,16 @@ namespace FluidNinjaBuoyancyWaveSource
 			// A thread group per cell of each body's box, its threads sharing the body's triangles.
 			const FIntVector Groups(Largest.X, Largest.Y, NumBodies);
 			RDG_EVENT_SCOPE_STAT(GraphBuilder, FNB_Raster, "FNB Raster %d bodies", NumBodies);
+			// The same lines per cell for a simulation and the own fields, so a body's own field keeps cancelling its waves in B.
+			const int32 Lines = SupportedRasterLines(Frame.RasterLines);
 			if (HeadPool)
 			{
 				FFluidNinjaBuoyancyWaveSelfRasterCS::FParameters* Parameters = GraphBuilder.AllocParameters<FFluidNinjaBuoyancyWaveSelfRasterCS::FParameters>();
 				Parameters->Raster = Raster;
 				Parameters->HeadPool = GraphBuilder.CreateUAV(HeadPool);
-				TShaderMapRef<FFluidNinjaBuoyancyWaveSelfRasterCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FFluidNinjaBuoyancyWaveSelfRasterCS::FPermutationDomain Permutation;
+				Permutation.Set<FFluidNinjaBuoyancyWaveRasterLinesDim>(Lines);
+				TShaderMapRef<FFluidNinjaBuoyancyWaveSelfRasterCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Permutation);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("FluidNinjaBuoyancyWaves SelfStaticHead %d bodies", NumBodies), Shader, Parameters, Groups);
 			}
 			else
@@ -660,12 +727,15 @@ namespace FluidNinjaBuoyancyWaveSource
 				Parameters->Raster = Raster;
 				Parameters->HeadOut = GraphBuilder.CreateUAV(Head);
 				Parameters->SpeedOut = GraphBuilder.CreateUAV(Speed);
-				TShaderMapRef<FFluidNinjaBuoyancyWaveRasterCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FFluidNinjaBuoyancyWaveRasterCS::FPermutationDomain Permutation;
+				Permutation.Set<FFluidNinjaBuoyancyWaveRasterLinesDim>(Lines);
+				TShaderMapRef<FFluidNinjaBuoyancyWaveRasterCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel), Permutation);
 				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("FluidNinjaBuoyancyWaves StaticHead %d bodies", NumBodies), Shader, Parameters, Groups);
 			}
 		}
 
-		static void AddSplat(FRDGBuilder& GraphBuilder, const FFluidNinjaBuoyancyWaveGrid& Grid, TArrayView<const FVector4f> Impulses, float SmoothCm, FRDGTextureRef Impulse)
+		static void AddSplat(FRDGBuilder& GraphBuilder, const FFluidNinjaBuoyancyWaveGrid& Grid, TArrayView<const FVector4f> Impulses, float SmoothCm, FRDGTextureRef Impulse,
+			FRDGTextureRef Steady)
 		{
 			if (Impulses.IsEmpty())
 			{
@@ -679,6 +749,9 @@ namespace FluidNinjaBuoyancyWaveSource
 			Parameters->ImpulseFixedScale = ImpulseFixedScale;
 			Parameters->SmoothCells = Grid.CellCm > 0.f ? FMath::Clamp(SmoothCm / Grid.CellCm, 0.f, WaveSplatMaxSigmaCells) : 0.f;
 			Parameters->ImpulseRW = GraphBuilder.CreateUAV(Impulse);
+			// A planing hull's steady pieces into Steady too (the wash texture's B, interface version 6); without one a 1 x 1 stand-in.
+			Parameters->SteadyRW = GraphBuilder.CreateUAV(Steady ? Steady : GraphBuilder.CreateTexture(CellDesc(FIntPoint(1, 1), PF_R32_UINT), TEXT("FluidNinjaBuoyancy.Waves.NoSteady")));
+			Parameters->HasSteady = Steady ? 1 : 0;
 			TShaderMapRef<FFluidNinjaBuoyancyWaveSplatCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("FluidNinjaBuoyancyWaves ImpulseSplat %d", Impulses.Num()), Shader, Parameters,
 				FIntVector(FMath::DivideAndRoundUp(Impulses.Num(), WaveLineGroup), 1, 1));
@@ -796,7 +869,27 @@ namespace FluidNinjaBuoyancyWaveSource
 				Origins.Init(Source.Mirror.Origin, Source.Bodies.Num());
 				AddRaster(GraphBuilder, Grid, Source.Bodies, Origins, {}, Source.Mirror, Frame, MirrorTexture, Triangles, Head, Speed, nullptr);
 			}
-			AddSplat(GraphBuilder, Grid, Source.Impulses, Frame.SmoothCm, Impulse);
+			// The wash texture (interface version 6): its target must be W x H RGBA16F on the source's cells; the steady impulse head goes into
+			// its B, so the splat keeps the steady pieces apart in Steady.
+			FRDGTextureRef Steady = nullptr;
+			bool bWash = false;
+			if (Source.bWash && Source.WashTarget)
+			{
+				const FRHITextureDesc& WashDesc = Source.WashTarget->GetDesc();
+				bWash = WashDesc.Dimension == ETextureDimension::Texture2D && WashDesc.Format == PF_FloatRGBA && WashDesc.Extent == Cells;
+				if (!bWash && !Gpu.bWarnedWash)
+				{
+					UE_LOG(LogFluidNinjaBuoyancyWaveSource, Error, TEXT("Waves: the wash render target is %dx%d %s; it must be %dx%d RGBA16F. No wash is written."),
+						WashDesc.Extent.X, WashDesc.Extent.Y, GPixelFormats[WashDesc.Format].Name, Cells.X, Cells.Y);
+					Gpu.bWarnedWash = true;
+				}
+			}
+			if (bWash)
+			{
+				Steady = GraphBuilder.CreateTexture(CellDesc(Cells, PF_R32_UINT), TEXT("FluidNinjaBuoyancy.Waves.SteadyImpulse"));
+				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Steady), 0u);
+			}
+			AddSplat(GraphBuilder, Grid, Source.Impulses, Frame.SmoothCm, Impulse, Steady);
 			const double CellArea = static_cast<double>(Source.CellCm) * static_cast<double>(Source.CellCm);
 			const double PerHead = static_cast<double>(Frame.Density) * static_cast<double>(Frame.Gravity) * CellArea * ImpulseFixedScale;
 			if (!Source.Pokes.IsEmpty())
@@ -842,6 +935,81 @@ namespace FluidNinjaBuoyancyWaveSource
 			if (!bUAV)
 			{
 				// The render target was made without UAV access: write a texture of the same format and copy it across.
+				AddCopyTexturePass(GraphBuilder, Written, Target);
+			}
+			if (bWash)
+			{
+				AddWash(GraphBuilder, Grid, Source, Steady, Parameters->ImpulseToHead);
+			}
+		}
+
+		/** The wash texture (interface version 6): each patch's foam rates summed per cell, then written with the steady impulse head. */
+		static void AddWash(FRDGBuilder& GraphBuilder, const FFluidNinjaBuoyancyWaveGrid& Grid, const FSource& Source, FRDGTextureRef Steady, float ImpulseToHead)
+		{
+			const FIntPoint Cells = Source.Cells;
+			RDG_EVENT_SCOPE_STAT(GraphBuilder, FNB_Wash, "FNB Wash %d", Source.Washes.Num() / 2);
+			FRDGTextureRef Fresh = GraphBuilder.CreateTexture(CellDesc(Cells, PF_R32_UINT), TEXT("FluidNinjaBuoyancy.Waves.WashFresh"));
+			FRDGTextureRef Aged = GraphBuilder.CreateTexture(CellDesc(Cells, PF_R32_UINT), TEXT("FluidNinjaBuoyancy.Waves.WashAged"));
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Fresh), 0u);
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(Aged), 0u);
+			// The patches: a box of 3 σ about each, one cell of margin.
+			TArray<FVector4f> Data;
+			TArray<FUintVector4> Info;
+			FIntPoint Largest = FIntPoint::ZeroValue;
+			const int32 NumPatches = FMath::Min(Source.Washes.Num() / 2, WaveMaxWashes);
+			Data.Reserve(2 * NumPatches);
+			Info.Reserve(NumPatches);
+			for (int32 Index = 0; Index < NumPatches; ++Index)
+			{
+				const FVector4f& Place = Source.Washes[2 * Index];
+				const FVector4f& Rates = Source.Washes[2 * Index + 1];
+				if (!FMath::IsFinite(Place.X) || !FMath::IsFinite(Place.Y) || !FMath::IsFinite(Place.Z) || !FMath::IsFinite(Rates.X) || !FMath::IsFinite(Rates.Y)
+					|| !(Rates.X > 0.f || Rates.Y > 0.f))
+				{
+					continue;
+				}
+				const float Reach = 3.f * FMath::Max(Place.Z, 1.f);
+				FBody Patch;
+				Patch.Bounds = FVector4f(Place.X - Reach, Place.Y - Reach, Place.X + Reach, Place.Y + Reach);
+				const FIntRect Box = BodyCells(Patch, Cells, Grid.CellCm);
+				if (Box.Width() <= 0 || Box.Height() <= 0)
+				{
+					continue;
+				}
+				Data.Add(Place);
+				Data.Add(Rates);
+				Info.Add(FUintVector4(static_cast<uint32>(Box.Min.X), static_cast<uint32>(Box.Min.Y), static_cast<uint32>(Box.Width()), static_cast<uint32>(Box.Height())));
+				Largest = Largest.ComponentMax(Box.Size());
+			}
+			if (!Info.IsEmpty())
+			{
+				FFluidNinjaBuoyancyWaveWashCS::FParameters* Parameters = GraphBuilder.AllocParameters<FFluidNinjaBuoyancyWaveWashCS::FParameters>();
+				Parameters->Grid = Grid;
+				Parameters->WashData = GraphBuilder.CreateSRV(CreateStructuredBuffer(GraphBuilder, TEXT("FluidNinjaBuoyancy.Waves.WashData"), Data));
+				Parameters->WashInfo = GraphBuilder.CreateSRV(CreateStructuredBuffer(GraphBuilder, TEXT("FluidNinjaBuoyancy.Waves.WashInfo"), Info));
+				Parameters->NumWashes = Info.Num();
+				Parameters->WashFixedScale = WaveWashFixedScale;
+				Parameters->WashFreshRW = GraphBuilder.CreateUAV(Fresh);
+				Parameters->WashAgedRW = GraphBuilder.CreateUAV(Aged);
+				TShaderMapRef<FFluidNinjaBuoyancyWaveWashCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("FluidNinjaBuoyancyWaves Wash %d", Info.Num()), Shader, Parameters, CellGroups(Largest, Info.Num()));
+			}
+			FRDGTextureRef Target = RegisterExternalTexture(GraphBuilder, Source.WashTarget, TEXT("FluidNinjaBuoyancy.WaveWashTexture"));
+			const bool bUAV = EnumHasAnyFlags(Source.WashTarget->GetDesc().Flags, ETextureCreateFlags::UAV);
+			FRDGTextureRef Written = bUAV ? Target : GraphBuilder.CreateTexture(CellDesc(Cells, PF_FloatRGBA), TEXT("FluidNinjaBuoyancy.Waves.Wash"));
+			FFluidNinjaBuoyancyWaveWashAssembleCS::FParameters* Parameters = GraphBuilder.AllocParameters<FFluidNinjaBuoyancyWaveWashAssembleCS::FParameters>();
+			Parameters->Grid = Grid;
+			Parameters->WashFreshIn = Fresh;
+			Parameters->WashAgedIn = Aged;
+			Parameters->SteadyIn = Steady ? Steady : BlackTexture(GraphBuilder);
+			Parameters->HasSteadyIn = Steady ? 1 : 0;
+			Parameters->WashFixedScale = WaveWashFixedScale;
+			Parameters->ImpulseToHead = ImpulseToHead;
+			Parameters->WashOut = GraphBuilder.CreateUAV(Written);
+			TShaderMapRef<FFluidNinjaBuoyancyWaveWashAssembleCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("FluidNinjaBuoyancyWaves WashAssemble %dx%d", Cells.X, Cells.Y), Shader, Parameters, CellGroups(Cells));
+			if (!bUAV)
+			{
 				AddCopyTexturePass(GraphBuilder, Written, Target);
 			}
 		}

@@ -13,6 +13,9 @@
 // Interface version 5: Emitter.Wave.VMeanRelax, the closed-window <v> pin's rate (1/s) from User.Wave.VMeanRelax, only floored at 0 here,
 // as Wave.MeanRelax is: Wave Step clamps both against the Dt it integrates with, next to the terms they scale. The asset default 0 keeps
 // the pin off, so a plugin that never sets it runs interface 4's (eta, v).
+// Interface version 6: the aged foam and the wash (Ninja_WaveStep), foam only. Emitter.Wave.FoamAgedDecay (1/s), .FoamTransfer (0..1),
+// .FoamDiffusion and .FoamAgedDiffusion (cm2/s), .FoamSlope (cm/cm, 0 = the physics' Wave.BreakingSlope) and .FoamWash (scale) from the
+// matching User.Wave.* parameters, floored at 0 (FoamTransfer clamped to 0..1). Nothing here touches the wave state's parameters.
 int RTW;
 int RTH;
 RT_Pressure.GetRenderTargetSize(RTW, RTH);
@@ -66,3 +69,9 @@ FoamDecay = max(InFoamDecay, 0.0);
 FoamBreaking = max(InFoamBreaking, 0.0);
 FoamWake = max(InFoamWake, 0.0);
 FoamImpact = max(InFoamImpact, 0.0);
+FoamAgedDecay = max(InFoamAgedDecay, 0.0);
+FoamTransfer = clamp(InFoamTransfer, 0.0, 1.0);
+FoamDiffusion = max(InFoamDiffusion, 0.0);
+FoamAgedDiffusion = max(InFoamAgedDiffusion, 0.0);
+FoamSlope = max(InFoamSlope, 0.0);
+FoamWash = max(InFoamWash, 0.0);

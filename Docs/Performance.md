@@ -115,3 +115,17 @@ that follows the player always won, and a pool full of floaters 15 m away never 
 - **The bench's own frame rate.** Uncapped bench runs of the Phase 4 build held about 49 fps where earlier builds held 60; whether that
   was the build or other load on the machine was not settled. The bench verdicts are taken on a fixed frame step, which makes them
   independent of it.
+- **The motorboat features.** None of them has been profiled yet. What they add:
+  - the spray sheets: CPU Niagara particles outside the splash budget, up to 900 drops a second per sheet before Spray Sheet Rate
+    (up to 4) and `fnb.Effects.SprayRateScale` (1.5 at Cinematic) multiply it, three sheets per fast boat, each drop living 1.2-2.4 s:
+    about 6,500 live particles per boat at that cap with both at 1 (fewer as drops die at the water), and up to about six times that
+    at Spray Sheet Rate 4 on Cinematic;
+  - a planing hull's wave-making resistance, on the physics thread 10 times a second: each evaluation merges the wet hull pieces into
+    cells of Hull Resolution (about 120 for a 5 m hull of 25 cm pieces) and sums them over 33 to 257 angles (about 160 there), with
+    one sine/cosine pair per cell and angle, the Gaussian spread shared by 16 groups, and a 40-step root search per angle in finite
+    depth: about 16,500 sine/cosine pairs and 950 exponentials per evaluation (from about 45,500 of each before the merge);
+  - planing hulls stay at their finest level of detail at every distance, so the hull's distance LODs save nothing on them;
+  - foam v2 on the GPU: one wash pass per simulation and frame (each whitewater patch summed into its cells, then assembled with the
+    steady impulse head), and the memory. On an interface 6 core the foam target is RGBA16F (8 bytes per wave cell, against R16F's 2)
+    and each simulation gets a wash texture of the same size (8 bytes per cell), so an 800² wave grid holds about 10 MB of foam
+    targets instead of 1.3 MB (`fnb.Memory` lists both).

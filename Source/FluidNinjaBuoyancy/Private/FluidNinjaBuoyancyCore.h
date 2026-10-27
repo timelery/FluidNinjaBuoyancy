@@ -118,6 +118,53 @@ namespace FluidNinjaBuoyancy
 		bool Sample(const FVector& Point, float& OutHeight, FVector& OutWaterVelocity) const;
 	};
 
+	/** How the water's dynamic pressure acts on a triangle hull (UFluidNinjaBuoyancyComponent::HullFlow). */
+	enum class EHullFlow : uint8
+	{
+		/** Kerner's pressure drag and suction (the drag coefficients and their falloff powers), as before. */
+		Displacement,
+		/** A planing hull: the dynamic pressure on a face meeting the flow follows Savitsky's planing law, k · ½ρV² · cos θ (linear in the
+		 * incidence, so a bottom at trim τ lifts k · ½ρV² sin τ per unit area); the suction behind the hull is capped at the local
+		 * hydrostatic head (the water lets go of a transom: a ventilated stern); a slam takes only the vertical entry speed (the forward
+		 * speed's pressure is the planing law's); the steady part of the pressure enters FluidNinja Waves at its full weight; and the hull
+		 * pays the wave-making resistance of its own pressure (Havelock), which gives the hump before it planes (its pressure faded in from
+		 * a wetted transom below a transom Froude number of about 2.5, where the water closes up behind the stern). */
+		Planing,
+	};
+
+	/** How the propeller is driven (UFluidNinjaBuoyancyComponent::PropulsionModel). */
+	enum class EPropulsionModel : uint8
+	{
+		/** Throttle × Max Thrust at the thrust point while that point is under water, as before. */
+		Simple,
+		/** An engine (power, rev limit, response) through a gearbox to a propeller with open-water thrust and torque curves (KT, KQ against
+		 * the advance ratio J = Va / nD): thrust and rpm follow the boat's speed through the water, the disc's immersion and ventilation;
+		 * the propeller's torque reacts on the hull, and its jet washes the rudder. */
+		Propeller,
+	};
+
+	/** The propeller's open-water curves: KT and KQ at J = Index × PropTableStep, forward running, linear between, extrapolated beyond. */
+	constexpr int32 PropTableSize = 17;
+
+	/** The propulsor's state on one step (physics thread), for the readout, the sounds, the wash and the spray. */
+	struct FPropulsorResult
+	{
+		bool bActive = false;            // a propeller model ran this step
+		float Thrust = 0.f;              // along Axis (negative astern), kg·cm/s²
+		float ShaftTorque = 0.f;         // the torque the water takes from the propeller, kg·cm²/s²
+		float ShaftRpm = 0.f;            // the propeller shaft, rev/min (negative astern)
+		float EngineRpm = 0.f;           // the engine, rev/min
+		float Power = 0.f;               // delivered to the water, kg·cm²/s³ (× 1e-4 = W)
+		float Immersion = 0.f;           // the share of the disc under the water, 0..1
+		float JetSpeed = 0.f;            // the slipstream's speed through the water far behind the disc, cm/s
+		float AdvanceSpeed = 0.f;        // the water's speed into the disc along its axis, cm/s
+		float Load = 0.f;                // the engine's torque over what it can give at this rpm, 0..1
+		int8 Gear = 0;                   // 1 ahead, 0 neutral, -1 astern
+		bool bVentilated = false;        // air drawn down onto the blades: thrust and torque lost
+		FVector Location = FVector::ZeroVector;   // the disc's centre, world
+		FVector Axis = FVector::ForwardVector;    // the thrust direction ahead (turned with the drive when it steers), world
+	};
+
 	struct FParams
 	{
 		float Rho = 0.001f;                 // water, kg/cm³
@@ -139,6 +186,13 @@ namespace FluidNinjaBuoyancy
 		float FlowCoupling = 1.f;
 		FVector AngularDamping = FVector::ZeroVector;   // roll, pitch, yaw, 1/s, scaled by the wetted fraction
 
+		// The keel: the hull's lateral plane under the water (keel, skeg, pump housing, strakes), a low-aspect-ratio wing against the
+		// slide at the centre of lateral resistance. Any hull model and flow, with or without propulsion.
+		FVector KeelLocal = FVector::ZeroVector;   // its centre (body frame, cm, at world size)
+		float KeelArea = 0.f;                      // cm² (0: no keel)
+		float KeelDepth = 15.f;                    // its vertical span, cm, centred on KeelLocal: its immersion and aspect ratio
+		float KeelCrossflow = 1.f;                 // the crossflow drag coefficient of the slide
+
 		bool bPropulsion = false;
 		FVector ThrustLocal = FVector::ZeroVector;
 		FVector ThrustDirectionLocal = FVector::ForwardVector;
@@ -148,6 +202,35 @@ namespace FluidNinjaBuoyancy
 		FVector RudderLocal = FVector::ZeroVector;
 		float RudderArea = 0.f;              // cm²
 		float RudderAngle = 0.f;             // rad, positive turns right (bow towards +Y)
+
+		// The hull's flow (triangles only; a point model ignores it).
+		EHullFlow HullFlow = EHullFlow::Displacement;
+		float PlaningPressureCoefficient = 0.6f;   // k of the planing law
+		float WaveResistanceScale = 1.f;           // Havelock's wave-making resistance (planing): 1 physical, 0 off
+		float WaterDepth = 0.f;                    // cm under the body, for the wave resistance (0: deep water)
+		float HullPieceCm = 25.f;                  // the hull's piece size: the shortest waves its pressure can be said to make
+		// FluidNinja Waves (planing): the steady part of each piece's dynamic impulse is marked (its area negative) for the waves' own scale.
+		bool bSplitSteadyImpulses = false;
+
+		// The propeller model (Propeller); Simple uses MaxThrust and PropWashSpeed above.
+		EPropulsionModel PropulsionModel = EPropulsionModel::Simple;
+		float EnginePower = 0.f;             // at the rated rpm, kg·cm²/s³ (W × 1e4)
+		float EngineMaxRpm = 5800.f;         // the rev limit, rev/min (rated power is reached there)
+		float EngineIdleRpm = 800.f;         // rev/min
+		float EngineResponseSeconds = 0.4f;  // the throttle's lag, s
+		float EngineInertia = 1000.f;        // the engine's rotating parts, at the engine shaft, kg·cm²
+		float GearRatio = 2.f;               // engine turns per propeller turn
+		float GearEfficiency = 0.95f;
+		float PropDiameter = 28.f;           // cm
+		float PropInertia = 200.f;           // kg·cm²
+		float PropWakeFraction = 0.05f;      // the hull's wake: the disc meets the water at (1 - w) of the boat's speed through it
+		float ReverseEfficiency = 0.6f;      // astern, KT and KQ are this share of ahead's
+		float VentilatedFactor = 0.45f;      // KT and KQ while the disc is ventilated
+		float PropHand = 1.f;                // 1 right-handed (clockwise from astern going ahead), -1 left-handed
+		bool bSteerableThrust = false;       // an outboard or sterndrive: the thrust turns with the rudder angle
+		float PropTableStep = 0.1f;          // J between table entries
+		float PropKT[PropTableSize] = {};
+		float PropKQ[PropTableSize] = {};
 	};
 
 	struct FBodyState
@@ -176,6 +259,23 @@ namespace FluidNinjaBuoyancy
 		float WaterRate = 0.f;
 		float WaterAcceleration = 0.f;
 		int32 WaterSamples = 0;
+
+		/** The propeller model: the shaft's speed (rad/s, positive ahead), the engine's (rad/s), the throttle the engine has caught up with
+		 * (0..1), the gear, whether the clutch slipped on the last step (the shaft turning against the gear: the engine keeps its own
+		 * speed until the two lock), and whether the disc is ventilated (with how long it has been fully under water since). */
+		float ShaftOmega = 0.f;
+		float EngineOmega = 0.f;
+		float EngineThrottle = 0.f;
+		int8 Gear = 0;
+		bool bClutchSlipping = false;
+		bool bVentilated = false;
+		float ImmersedSeconds = 0.f;
+
+		/** The wave-making resistance (planing): evaluated every WaveResistanceInterval seconds (0.1 s; Seconds counts the time since),
+		 * low-passed, and applied every step (world, kg·cm/s²). */
+		float WaveResistanceSeconds = TNumericLimits<float>::Max();
+		FVector WaveResistanceRaw = FVector::ZeroVector;
+		FVector WaveResistance = FVector::ZeroVector;
 	};
 
 	/** The hull's water line sampled in sectors around it (body frame): where it drives into the water (wakes, spray) and where the
@@ -211,6 +311,21 @@ namespace FluidNinjaBuoyancy
 		FVector SlamLocation = FVector::ZeroVector;   // where the hull piece taking the largest share of it meets the water
 		float EntryPower = 0.f;          // the body's entry power, on the step it enters the water (NoteEntry), kg·cm²/s³; 0 on every other step
 		float ThrustApplied = 0.f;
+		/** The propeller model's state this step (bActive false under Simple, or without propulsion). */
+		FPropulsorResult Propulsor;
+		/** The wave-making resistance applied this step (planing), world, kg·cm/s² (included in Force). */
+		FVector WaveResistance = FVector::ZeroVector;
+		/** The vertical force of the propulsion, the rudder and the keel this step (kg·cm/s², included in Force): not the water's dynamic
+		 * push on the hull's pieces (a banked keel's side force tilts up or down, and gives the waves no pieces of its own), so the ripple
+		 * budget leaves it out. */
+		float PropulsionForceZ = 0.f;
+		/** The keel's side force against the slide this step, its size (kg·cm/s², included in Force); 0 without a keel (KeelArea), with it
+		 * out of the water, or running straight. */
+		float KeelForce = 0.f;
+		/** A boat's drift (propulsion on, or a keel): the angle between its heading (its +X, level) and its horizontal velocity through the
+		 * water at the centre of mass, degrees, signed: positive while it slides toward its right (+Y), so a turn to the right reads
+		 * negative; near ±180 going astern. 0 below DriftMinSpeed, while the body is dry, and for other bodies. */
+		float DriftAngleDeg = 0.f;
 		bool bTouchesWater = false;
 		TArray<FVector> Waterline;       // segment pairs, only when asked for
 
@@ -219,7 +334,11 @@ namespace FluidNinjaBuoyancy
 		 * hydrostatic lift and skin friction make no waves of their own here). Per piece: world X, world Y, the impulse downward into
 		 * the water over the step (kg·cm/s), and the piece's area seen from above (cm²). The water pushing the body up is the body
 		 * pushing the water down, so the impulse is the piece's upward force × the step: positive presses the water down, negative
-		 * (suction on a rising hull) pulls it up. Pieces with no dynamic force are left out. */
+		 * (suction on a rising hull) pulls it up. Pieces with no dynamic force are left out.
+		 * Planing (FParams::bSplitSteadyImpulses): each wet piece's dynamic impulse is split by what drives it. The share its horizontal
+		 * motion through the water drives (a planing bottom's steady lift) comes as its own piece with its area NEGATIVE; the share its
+		 * vertical motion drives (heave, a drop: the transient the static head's change already radiates in part) and every slam come with
+		 * a positive area. Readers take the area as its absolute value. */
 		TArray<FVector4f> RippleImpulses;
 
 		/** How stiff and how damped the water holds the body this step, for stable steps (StabilizeStep). Heave: the lift gained per cm
@@ -290,4 +409,29 @@ namespace FluidNinjaBuoyancy
 
 	/** The lowest and highest point of the hull turned to Attitude (cm, about the body's origin). */
 	void RestedExtent(const FHull& Hull, const FQuat& Attitude, float& OutBottom, float& OutTop);
+
+	/** A generic fixed-pitch propeller's open-water curves for its pitch ratio P/D (fitted to the Wageningen B-series' shape: four blades,
+	 * blade-area ratio about 0.7), into Out.PropKT / PropKQ / PropTableStep: KT = KT0 (1 - (J/J0)^1.6), KQ = KQ0 (1 - 0.76 (J/J0)^1.6) with
+	 * J0 = 1.08 P/D (the advance ratio of no thrust), KT0 = 0.45 (P/D)^1.2 and KQ0 = 0.062 (P/D)^1.7. The peak open-water efficiency comes
+	 * out about 0.65-0.75 near J = 0.75 J0, as the series' does. */
+	void FillPropellerSeries(float PitchRatio, FParams& Out);
+
+	/**
+	 * Havelock's wave-making resistance of a steady pressure distribution moving at U over water Depth deep (0: deep water): the drag the
+	 * waves it radiates take from it (kg·cm/s²). Loads: (x along the motion, y across it, the vertical load F (kg·cm/s²), σ (cm): the piece's
+	 * load spread as a Gaussian of that width); KMax: the shortest wave (wavenumber, 1/cm) the pressure can be said to make.
+	 *   R = 1/(2πρg) ∫ |P̂(k(θ), θ)|² cos θ k³ T / |T - kh sech²(kh)| dθ over θ in (-π/2, π/2),
+	 *   g k tanh(kh) = U² k² cos² θ (the waves that keep station with the pressure), T = tanh(kh),
+	 *   P̂(k, θ) = Σ F e^{i k (x cos θ + y sin θ)} e^{-k² σ² / 2}.
+	 * Checked against Lamb's two-dimensional result (a wide patch, within 2 %). The Jacobian's factor is held at most 10 near the critical
+	 * speed √(gh), where the linear theory blows up. For speed the loads are first merged into cells of π / KMax (the shortest wave's half
+	 * length: a hull's piece), loads under a thousandth of the largest left out, and the spread taken once per group of cells of about the
+	 * same σ: within about 1 % of the loads' own result wherever the pressure's waves are resolved. Thread-safe (its scratch is per thread).
+	 */
+	float WaveMakingResistance(TArrayView<const FVector4f> Loads, float U, float Rho, float Gravity, float Depth, float KMax);
+
+	/** Takes one splash from the frame's shared splash budget (fnb.Effects.SplashBudgetPerFrame), which the floating bodies' splashes and
+	 * UFluidNinjaBuoyancySubsystem::AddWaterContact's spend together: Reach 0 (near) may take the whole budget, anything farther only its
+	 * first half; false when there is none left. Game thread. Defined in FluidNinjaBuoyancyComponent.cpp, beside the bodies' own use. */
+	bool TakeSharedSplashBudget(int32 Reach);
 }

@@ -36,6 +36,17 @@
 // 0.5 / Dt, equality included, (eta, v) is what interface 4 computes, bit for bit, so a plugin that sends no VMeanRelax gets exactly the
 // old step, also at a MeanRelax it clamped to 0.5 / its tick itself. The cost is one more parameter and, in a walled window, a few ALU per
 // cell: the top-mip texel is loaded once for both pins.
+// Interface version 6: richer, longer-lived whitewater, foam only. Everything below the physics; (eta, v), Decay, the sponge, the k = 0 pins
+// and the export are untouched, so the wave state is interface 5's bit for bit for every input (and SelfStepCS needs no change).
+//   - two foam fields: F1 = Foam (fresh, as before) and F2 = FoamAged (aged), each carried by Wave Prepare (F2 handed over as hi + lo,
+//     lo scaled by FoamAgedLoScale so no GPU flushes it as a half-float denormal; Ninja_WavePrepare.hlsl and _foamaged.hlsl say why);
+//   - (a) the foam's own breaking threshold Wave.FoamSlope (whitecaps start there on the same Slope; 0 = the physics' Wave.BreakingSlope);
+//   - (c) impacts less the steady part of the impulse head the plugin marks in the wash's B (planing pressure makes no impact foam);
+//   - (d) the wash (User.WaveWashTexture, _wash.hlsl): the plugin's F1 and F2 rates, scaled by Wave.FoamWash;
+//   - decay and transfer: F1 decays at Wave.FoamDecay, Wave.FoamTransfer of what it loses becomes F2, F2 decays at Wave.FoamAgedDecay;
+//   - (e) spreading: Wave.FoamDiffusion / Wave.FoamAgedDiffusion (cm2/s), explicit and masked, on the advected scratch before the sources.
+// At FoamSlope 0, FoamDiffusion 0, and no wash bound (or a wash whose B is 0, at FoamWash 0 or with R 0) F1 is interface 5's F exactly,
+// whatever F2 does: (c) takes the wash's B off the impulse unconditionally; FoamWash gates only (d), the wash's R and G.
 int IX;
 int IY;
 WaveGrid.ExecutionIndexToGridIndex(IX, IY);
@@ -284,22 +295,81 @@ if (MeanRelax > 0.0 && Top.y > 1e-6)
 	EtaNew -= Dt * RateS * MeanS * Wet;
 }
 
-// ---- foam (interface version 4): after the physics, which it never feeds. 0 while the foam is off, so the grid's Foam is always defined.
+// ---- foam (interface versions 4 and 6): after the physics, which it never feeds. 0 while the foam is off, so the grid's Foam and
+// FoamAged are always defined.
 float FoamNew = 0.0;
+float FoamAgedNew = 0.0;
+//@include _foamaged.hlsl
 if (FoamEnabled)
 {
+	// The scratch Wave Prepare left: F1 advected in .x, F2 advected as hi in .y plus lo stored times FoamAgedLoScale in .z (_foamaged.hlsl).
 	float4 FoamIn;
 	WaveFoam.LoadRenderTargetValue(IX, IY, 0, FoamIn);
 	float Foam = FoamIn.x;
-	// (a) what breaks: the breaking decay times the water's speed.
-	Foam += Dt * FoamBreaking * FoamBreak * abs(VAdv) * 0.01;
+	float FoamAgedIn = FoamIn.y + FoamIn.z * (1.0 / FoamAgedLoScale);
+	float FoamAged = FoamAgedIn;
+//@include _wash.hlsl
+	// (e) spreading (interface version 6), applied to the advected scratch before this tick's sources, so the centre and its neighbours
+	// are the same field: an explicit 5-point Laplacian over the four neighbours' scratch, counting only the wet ones (Wave Prepare's mask,
+	// .y of the 5 x 5 above: the foam does not spread onto a bank or across a walled border, and a dry neighbour is never read), at
+	// D_eff = min(D, 0.2 Dx^2 / Dt). Each wet neighbour's weight Dt D_eff / Dx^2 is then at most 0.2, so the update is a convex blend:
+	// stable, never negative, never past the largest value around. D = 0 adds nothing.
+	if ((FoamDiffusion > 0.0 || FoamAgedDiffusion > 0.0) && Dt > 0.0 && Dx > 0.0)
+	{
+		float FoamLap = 0.0;
+		float FoamAgedLap = 0.0;
+		int2 FoamNbOffset[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+		float FoamNbWet[4] = { East.y, West.y, North.y, South.y };
+		for (int FoamNbI = 0; FoamNbI < 4; ++FoamNbI)
+		{
+			if (FoamNbWet[FoamNbI] > 0.5)
+			{
+				float4 FoamNb;
+				WaveFoam.LoadRenderTargetValue(IX + FoamNbOffset[FoamNbI].x, IY + FoamNbOffset[FoamNbI].y, 0, FoamNb);
+				FoamLap += FoamNb.x - FoamIn.x;
+				FoamAgedLap += (FoamNb.y + FoamNb.z * (1.0 / FoamAgedLoScale)) - FoamAgedIn;
+			}
+		}
+		float FoamDxDx = Dx * Dx;
+		float FoamDMax = 0.2 * FoamDxDx / Dt;
+		if (FoamDiffusion > 0.0)
+		{
+			Foam += Dt * min(FoamDiffusion, FoamDMax) * FoamLap / FoamDxDx;
+		}
+		if (FoamAgedDiffusion > 0.0)
+		{
+			FoamAged += Dt * min(FoamAgedDiffusion, FoamDMax) * FoamAgedLap / FoamDxDx;
+		}
+	}
+	// (a) what breaks: the breaking rate times the water's speed. Interface version 6 gives the foam its own threshold on the same Slope (eta
+	// across source-free cells): past Wave.FoamSlope the slope part is 20 (1 - FoamSlope / Slope), plus the crest part (20 above 0.6 of the
+	// depth), so whitecaps can start on waves gentler than those the physics breaks. FoamSlope 0 takes FoamBreak, the physics' own breaking
+	// part, exactly as interface 4 and 5 did. Decay, which damps v, is computed above and left alone.
+	float FoamBreakRate = FoamBreak;
+	if (FoamSlope > 0.0)
+	{
+		FoamBreakRate = (Slope > FoamSlope ? 20.0 * (1.0 - FoamSlope / Slope) : 0.0) + (EtaAdv > 0.6 * Depth ? 20.0 : 0.0);
+	}
+	Foam += Dt * FoamBreaking * FoamBreakRate * abs(VAdv) * 0.01;
 	// (b) the waterline: the static head's slope (x - w = P + P_dyn in each wet cell of the 5 x 5; a dry one reads 0) times the hull's speed
 	// through the water there. Inside a flat hull the slope is 0; at its side it is the draft over a cell, clamped to 1.
 	float2 GradP = float2((East.x - East.w) - (West.x - West.w), (North.x - North.w) - (South.x - South.w)) * (0.5 / Dx);
 	Foam += Dt * FoamWake * saturate(length(GradP)) * SrcSpeed * 0.01;
-	// (c) what hits: this tick's share of the frame's impulse head.
-	Foam += FoamImpact * abs(SrcY) / (max(float(NumTimeSteps), 1.0) * 10.0);
-	FoamNew = min(Foam * exp(-Dt * FoamDecay), 1.0) * Wet;
+	// (c) what hits: this tick's share of the frame's impulse head, less its steady part the plugin marks in the wash's B (interface 6: a
+	// planing hull's held pressure makes no impact foam; with no wash B is 0, interface 4 and 5's term).
+	Foam += FoamImpact * abs(SrcY - Wash.z) / (max(float(NumTimeSteps), 1.0) * 10.0);
+	// (d) the wash (interface version 6): the plugin's own foam rates, per second, scaled by Wave.FoamWash.
+	if (FoamWash > 0.0)
+	{
+		Foam += Dt * FoamWash * max(Wash.x, 0.0);
+		FoamAged += Dt * FoamWash * max(Wash.y, 0.0);
+	}
+	// Decay and transfer: Wave.FoamTransfer of what the fresh foam loses this tick becomes aged foam, which decays at its own rate.
+	float FoamDecayed = Foam * exp(-Dt * FoamDecay);
+	FoamAged += FoamTransfer * (Foam - FoamDecayed);
+	float FoamAgedDecayed = FoamAged * exp(-Dt * FoamAgedDecay);
+	FoamNew = saturate(FoamDecayed) * Wet;
+	FoamAgedNew = saturate(FoamAgedDecayed) * Wet;
 }
 
 if (SrcErase > 0.5)
@@ -307,7 +377,9 @@ if (SrcErase > 0.5)
 	VNew = 0.0;
 	EtaNew = -SrcP * Wet;
 	FoamNew = 0.0;
+	FoamAgedNew = 0.0;
 }
 WaveGrid.SetVector2DValue<Attribute=Wave>(IX, IY, float2(EtaNew, VNew));
 WaveGrid.SetFloatValue<Attribute=Foam>(IX, IY, FoamNew);
+WaveGrid.SetFloatValue<Attribute=FoamAged>(IX, IY, FoamAgedNew);
 Done = Wet;

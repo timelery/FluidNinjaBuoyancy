@@ -36,6 +36,42 @@ static const float FluidNinjaWaveNoWater = -1.0e30;
 static const uint FluidNinjaWaveBodyStride = 7;
 // Threads sharing one cell's hull triangles in the raster (WaveRasterLanes in FluidNinjaBuoyancyWaveSource.cpp).
 #define FNB_WAVE_RASTER_LANES 64
+// Vertical lines per cell in the raster: P is the mean head over them (RasterCell says why). The raster shaders' permutation sets it from
+// Wave Raster Lines (1, 4, 8, 16 or 32; FFluidNinjaBuoyancyWaveRasterLinesDim); 16 in the passes compiled without it.
+#ifndef FNB_WAVE_RASTER_SAMPLES
+#define FNB_WAVE_RASTER_SAMPLES 16
+#endif
+// Where they cross the cell, in cells from its centre: one in each row and each column of an N x N grid, so a hull edge running along x
+// or y crosses one line at a time. 4 and 8: the standard 4x and 8x multisample patterns; 16 and 32: column k, row (g k mod N), g 5 and
+// 25 (the widest spacing of that kind); 1: the cell's centre, the raster before 2026-10-20.
+#if FNB_WAVE_RASTER_SAMPLES == 1
+static const float2 FluidNinjaWaveRasterSample[1] = {float2(0.0, 0.0)};
+#elif FNB_WAVE_RASTER_SAMPLES == 4
+static const float2 FluidNinjaWaveRasterSample[4] = {
+	float2(-0.125, -0.375), float2(0.375, -0.125), float2(-0.375, 0.125), float2(0.125, 0.375)};
+#elif FNB_WAVE_RASTER_SAMPLES == 8
+static const float2 FluidNinjaWaveRasterSample[8] = {
+	float2(0.0625, -0.1875), float2(-0.0625, 0.1875), float2(0.3125, 0.0625), float2(-0.1875, -0.3125),
+	float2(-0.3125, 0.3125), float2(-0.4375, -0.0625), float2(0.1875, 0.4375), float2(0.4375, -0.4375)};
+#elif FNB_WAVE_RASTER_SAMPLES == 16
+static const float2 FluidNinjaWaveRasterSample[16] = {
+	float2(-0.46875, -0.46875), float2(-0.40625, -0.15625), float2(-0.34375, 0.15625), float2(-0.28125, 0.46875),
+	float2(-0.21875, -0.21875), float2(-0.15625, 0.09375), float2(-0.09375, 0.40625), float2(-0.03125, -0.28125),
+	float2(0.03125, 0.03125), float2(0.09375, 0.34375), float2(0.15625, -0.34375), float2(0.21875, -0.03125),
+	float2(0.28125, 0.28125), float2(0.34375, -0.40625), float2(0.40625, -0.09375), float2(0.46875, 0.21875)};
+#elif FNB_WAVE_RASTER_SAMPLES == 32
+static const float2 FluidNinjaWaveRasterSample[32] = {
+	float2(-0.484375, -0.484375), float2(-0.453125, 0.296875), float2(-0.421875, 0.078125), float2(-0.390625, -0.140625),
+	float2(-0.359375, -0.359375), float2(-0.328125, 0.421875), float2(-0.296875, 0.203125), float2(-0.265625, -0.015625),
+	float2(-0.234375, -0.234375), float2(-0.203125, -0.453125), float2(-0.171875, 0.328125), float2(-0.140625, 0.109375),
+	float2(-0.109375, -0.109375), float2(-0.078125, -0.328125), float2(-0.046875, 0.453125), float2(-0.015625, 0.234375),
+	float2(0.015625, 0.015625), float2(0.046875, -0.203125), float2(0.078125, -0.421875), float2(0.109375, 0.359375),
+	float2(0.140625, 0.140625), float2(0.171875, -0.078125), float2(0.203125, -0.296875), float2(0.234375, 0.484375),
+	float2(0.265625, 0.265625), float2(0.296875, 0.046875), float2(0.328125, -0.171875), float2(0.359375, -0.390625),
+	float2(0.390625, 0.390625), float2(0.421875, 0.171875), float2(0.453125, -0.046875), float2(0.484375, -0.265625)};
+#else
+#error FNB_WAVE_RASTER_SAMPLES must be 1, 4, 8, 16 or 32
+#endif
 // The widest impulse splat, σ in cells (WaveSplatMaxSigmaCells in FluidNinjaBuoyancyWaveSource.cpp).
 #define FNB_WAVE_SPLAT_MAX_SIGMA 16.0
 // An impulse is spread over this many times its piece's own σ (a disc of its area: r / 2).
@@ -88,6 +124,10 @@ int NumImpulses;
 float ImpulseFixedScale;     // fixed-point units per kg·cm/s
 float SmoothCells;           // σ of the splat in cells, at least (a piece's own size may widen it; below 0.25 the splat is bilinear)
 RWTexture2D<uint> ImpulseRW; // signed fixed point (asint)
+// Interface version 6: a planing hull's steady pieces (their area negative) also go into SteadyRW (same units), the wash texture's B, which the
+// core's impact foam leaves out. HasSteady 0: none kept (no wash texture).
+RWTexture2D<uint> SteadyRW;
+int HasSteady;
 
 // Pokes (test bench): (x, y grid-relative, head cm, sigma cm): a Gaussian pressure head pressing for PokeSeconds.
 StructuredBuffer<float4> Pokes;
@@ -118,6 +158,22 @@ float ImpulseToHead;         // fixed-point units of a cell -> y (cm·s): 1 / (I
 float4 Header0;              // (OriginX, OriginY, Cell, Serial)
 float4 Header1;              // (TicksExpected, 0, 0, 0)
 RWTexture2D<float4> SourceOut;
+
+// Washes (interface version 6): the whitewater the bodies wash into the core's foam. Per patch two float4 in WashData, (x, y grid-relative cm,
+// σ cm, 0) and (fresh rate, aged rate, 0, 0) (foam per second at the centre of a Gaussian of σ), and one uint4 in WashInfo, its cell box;
+// summed per cell in fixed point (WashFixedScale units per 1/s) into WashFreshRW and WashAgedRW, then assembled with the steady impulse head
+// into the wash texture.
+StructuredBuffer<float4> WashData;
+StructuredBuffer<uint4> WashInfo;
+int NumWashes;
+float WashFixedScale;
+RWTexture2D<uint> WashFreshRW;
+RWTexture2D<uint> WashAgedRW;
+Texture2D<uint> WashFreshIn;
+Texture2D<uint> WashAgedIn;
+Texture2D<uint> SteadyIn;
+int HasSteadyIn;
+RWTexture2D<float4> WashOut;
 
 // Self fields in a batch (GridSize is N x N). Per field, FluidNinjaWaveSelfInfoStride int4 in SelfInfo: (pool slot, flags, atlas tile x, y),
 // (Wave Aux cell x, y of its cell (0, 0), the depth outside the simulation's window and its own sponge width, both as float bits),
@@ -287,21 +343,27 @@ uint CellIndex(int2 Cell)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Raster: P (cm), the static head of each body in each cell: where the cell's vertical line meets the hull, the depth of its lowest
-// crossing (the hull's bottom) below the wave-free surface, open interiors included (a row boat displaces as if filled to the water
-// line), at most the body's MaxHeadCm, times the body's multiplier; the deepest body per cell wins. Only where the column comes up
-// through the surface: a column whose top is under water lets go over its fade length. A body wholly under the surface is not sent
+// Raster: P (cm), the static head of each body in each cell: the mean over FNB_WAVE_RASTER_SAMPLES vertical lines spread across the
+// cell of, where a line meets the hull, the depth of its lowest crossing (the hull's bottom) below the wave-free surface, open interiors
+// included (a row boat displaces as if filled to the water line), at most the body's MaxHeadCm; times the body's multiplier; the deepest
+// body per cell wins. P is so the cell's mean displaced depth, and a hull's edge fills a cell as it moves across it. With one line, through
+// the cell's centre, a hull whose side stands upright under the water (a RIB's tubes, a jetski's or a motorboat's sides) pressed its
+// side's whole depth into a cell the moment the line met it and nothing the moment it left: a resting RIB drifting 0.1 cm a frame flipped
+// a cell along its tubes between 0 and 14-22 cm every frame or two, and as the surface draws B = η + P, every flip stood up as a spike at
+// the waterline that rang ±15-20 cm for over a second and broke into foam (a 120 m test basin, 2026-10-20). With N lines (Wave Raster
+// Lines, default 16) a flip is an Nth of the side's depth. Only where the column comes up through the surface: a column whose top is under water lets go over its
+// fade length. A body wholly under the surface is not sent
 // (the CPU leaves it out: P = 0), except a rigid hull whose head is being released (fnb.Waves.SubmergeRelease): the CPU sends it
 // lifted back to the height its top had above the water when it went under, with the cap it had then and a multiplier falling as
 // e^(-t/tau), so its columns press what they pressed then, fading in time rather than in one tick.
 // A thread group is one cell of one body: group z is the body, x, y the cell in that body's cell box (clamped to the grid on the CPU),
-// and its FNB_WAVE_RASTER_LANES threads share the hull's triangles (thread k takes triangles k, k + lanes, ...). The lowest
-// crossing and the number of crossings are then reduced in group memory: a minimum and a sum, the same in any order, so P is exactly
-// what one thread looping over every triangle finds.
+// and its FNB_WAVE_RASTER_LANES threads share the hull's triangles (thread k takes triangles k, k + lanes, ...). Each line's lowest
+// and highest crossing and its number of crossings are then reduced in group memory: a minimum, a maximum and a sum, the same in any
+// order, so P is exactly what one thread looping over every triangle finds.
 
-groupshared float RasterBottom[FNB_WAVE_RASTER_LANES];
-groupshared float RasterTop[FNB_WAVE_RASTER_LANES];
-groupshared uint RasterHits[FNB_WAVE_RASTER_LANES];
+groupshared float RasterBottom[FNB_WAVE_RASTER_SAMPLES * FNB_WAVE_RASTER_LANES];
+groupshared float RasterTop[FNB_WAVE_RASTER_SAMPLES * FNB_WAVE_RASTER_LANES];
+groupshared uint RasterHits[FNB_WAVE_RASTER_SAMPLES * FNB_WAVE_RASTER_LANES];
 
 // One cell of one body. Every thread of the group calls it (it synchronises the group); true in thread 0 when the body presses the cell,
 // with the cell, its head, and the body's speed through the water (BodyData, uniform over the body: the foam's waterline shear).
@@ -348,50 +410,79 @@ bool RasterCell(uint3 GroupId, uint Lane, out int2 Cell, out float Head, out flo
 	}
 	const float3 Translation = float3(Axis0.w, Axis1.w, Axis2.w);
 
-	// The vertical line through the cell centre, at the body's own height so the numbers stay small: its lowest crossing of the hull.
-	float Bottom = 1.0e30;
-	float HullTop = -1.0e30;
-	uint Hits = 0;
+	// The cell's vertical lines, at the body's own height so the numbers stay small: each one's lowest and highest crossing of the hull and
+	// its number of crossings, over this thread's triangles.
+	float Bottom[FNB_WAVE_RASTER_SAMPLES];
+	float HullTop[FNB_WAVE_RASTER_SAMPLES];
+	uint Hits[FNB_WAVE_RASTER_SAMPLES];
+	[unroll]
+	for (uint Sample = 0; Sample < FNB_WAVE_RASTER_SAMPLES; ++Sample)
+	{
+		Bottom[Sample] = 1.0e30;
+		HullTop[Sample] = -1.0e30;
+		Hits[Sample] = 0;
+	}
 	if (bActive && Info.z == 0u)
 	{
-		// Triangle hull: each triangle projected on the world XY plane (relative to the translation), the point tested with exact edge
-		// functions, so a line through a shared edge or vertex crosses each layer of the hull exactly once.
+		// Triangle hull: each triangle projected on the world XY plane (relative to the translation), each line tested with exact edge
+		// functions, so a line through a shared edge or vertex crosses each layer of the hull exactly once. A triangle whose projection
+		// misses the cell's square misses every line.
 		const float2 Point = P - Translation.xy;
+		const float HalfCell = 0.5 * CellCm;
 		for (uint K = Lane; K < Info.y; K += FNB_WAVE_RASTER_LANES)
 		{
 			const uint First = (Info.x + K) * 3;
 			const float3 A = HullPoint(Triangles[First].xyz, Axis0, Axis1, Axis2);
 			const float3 B = HullPoint(Triangles[First + 1].xyz, Axis0, Axis1, Axis2);
 			const float3 C = HullPoint(Triangles[First + 2].xyz, Axis0, Axis1, Axis2);
-			// Each edge function weighs the vertex opposite it.
-			const float EA = EdgeFunction(B.xy, C.xy, Point);
-			const float EB = EdgeFunction(C.xy, A.xy, Point);
-			const float EC = EdgeFunction(A.xy, B.xy, Point);
-			const bool bExit = Covers(EA, B.xy, C.xy) && Covers(EB, C.xy, A.xy) && Covers(EC, A.xy, B.xy);
-			const bool bEntry = !bExit && Covers(-EA, C.xy, B.xy) && Covers(-EB, A.xy, C.xy) && Covers(-EC, B.xy, A.xy);
-			const float Sum = EA + EB + EC;
-			if ((!bExit && !bEntry) || Sum == 0.0)
+			if (any(max(max(A.xy, B.xy), C.xy) < Point - HalfCell) || any(min(min(A.xy, B.xy), C.xy) > Point + HalfCell))
 			{
-				continue;   // missed, or a wall standing parallel to the line
+				continue;
 			}
-			const float Crossing = (EA * A.z + EB * B.z + EC * C.z) / Sum;
-			Bottom = min(Bottom, Crossing);
-			HullTop = max(HullTop, Crossing);
-			++Hits;
+			[unroll]
+			for (uint Sample = 0; Sample < FNB_WAVE_RASTER_SAMPLES; ++Sample)
+			{
+				const float2 Line = Point + FluidNinjaWaveRasterSample[Sample] * CellCm;
+				// Each edge function weighs the vertex opposite it.
+				const float EA = EdgeFunction(B.xy, C.xy, Line);
+				const float EB = EdgeFunction(C.xy, A.xy, Line);
+				const float EC = EdgeFunction(A.xy, B.xy, Line);
+				const bool bExit = Covers(EA, B.xy, C.xy) && Covers(EB, C.xy, A.xy) && Covers(EC, A.xy, B.xy);
+				const bool bEntry = !bExit && Covers(-EA, C.xy, B.xy) && Covers(-EB, A.xy, C.xy) && Covers(-EC, B.xy, A.xy);
+				const float Sum = EA + EB + EC;
+				if ((!bExit && !bEntry) || Sum == 0.0)
+				{
+					continue;   // missed, or a wall standing parallel to the line
+				}
+				const float Crossing = (EA * A.z + EB * B.z + EC * C.z) / Sum;
+				Bottom[Sample] = min(Bottom[Sample], Crossing);
+				HullTop[Sample] = max(HullTop[Sample], Crossing);
+				++Hits[Sample];
+			}
 		}
 	}
-	RasterBottom[Lane] = Bottom;
-	RasterTop[Lane] = HullTop;
-	RasterHits[Lane] = Hits;
+	[unroll]
+	for (uint Sample = 0; Sample < FNB_WAVE_RASTER_SAMPLES; ++Sample)
+	{
+		const uint Slot = Sample * FNB_WAVE_RASTER_LANES + Lane;
+		RasterBottom[Slot] = Bottom[Sample];
+		RasterTop[Slot] = HullTop[Sample];
+		RasterHits[Slot] = Hits[Sample];
+	}
 	GroupMemoryBarrierWithGroupSync();
 	[unroll]
 	for (uint Stride = FNB_WAVE_RASTER_LANES / 2; Stride > 0; Stride /= 2)
 	{
 		if (Lane < Stride)
 		{
-			RasterBottom[Lane] = min(RasterBottom[Lane], RasterBottom[Lane + Stride]);
-			RasterTop[Lane] = max(RasterTop[Lane], RasterTop[Lane + Stride]);
-			RasterHits[Lane] = RasterHits[Lane] + RasterHits[Lane + Stride];
+			[unroll]
+			for (uint Sample = 0; Sample < FNB_WAVE_RASTER_SAMPLES; ++Sample)
+			{
+				const uint Slot = Sample * FNB_WAVE_RASTER_LANES + Lane;
+				RasterBottom[Slot] = min(RasterBottom[Slot], RasterBottom[Slot + Stride]);
+				RasterTop[Slot] = max(RasterTop[Slot], RasterTop[Slot + Stride]);
+				RasterHits[Slot] = RasterHits[Slot] + RasterHits[Slot + Stride];
+			}
 		}
 		GroupMemoryBarrierWithGroupSync();
 	}
@@ -399,49 +490,9 @@ bool RasterCell(uint3 GroupId, uint Lane, out int2 Cell, out float Head, out flo
 	{
 		return false;
 	}
-	Bottom = RasterBottom[0];
-	Hits = RasterHits[0];
-	// The column's top: a hull's highest crossing (every wave hull is a union of convex pieces, so a column inside it is solid up to there;
-	// a row boat's convex hull fills it to the gunwales), or the capsule's top.
-	float Top = RasterTop[0];
-	if (Info.z == 2u)
-	{
-		// Lying ellipsoid (a swimming body): semi-axes Extra.x along its facing (Axis' first column), Extra.y across, HalfThickness up;
-		// centred on the translation. Its depth tapers smoothly to nothing at its rim, as a body's does: the upright capsule seen from above
-		// is a disc with a vertical wall, a one-cell step from 0 to its whole column, which broke, spiked and threw short steep waves.
-		const float2 Offset = P - Translation.xy;
-		const float Along = dot(Offset, float2(Axis0.x, Axis1.x)) / max(Extra.x, 1.0);
-		const float Across = dot(Offset, float2(Axis0.y, Axis1.y)) / max(Extra.y, 1.0);
-		const float Inside = 1.0 - Along * Along - Across * Across;
-		if (Inside <= 0.0 || HalfThickness <= 0.0)
-		{
-			return false;
-		}
-		const float Half = HalfThickness * sqrt(Inside);
-		Bottom = -Half;
-		Top = Half;
-		Hits = 1;
-	}
-	else if (Info.z != 0u)
-	{
-		// Upright capsule (the swimmer): radius Extra.x, half-height with the caps Extra.y, centred on the translation.
-		const float Radius = Extra.x;
-		const float2 Offset = P - Translation.xy;
-		const float Across = dot(Offset, Offset);
-		if (Radius > 0.0 && Across < Radius * Radius)
-		{
-			Bottom = -max(Extra.y - Radius, 0.0) - sqrt(Radius * Radius - Across);
-			Top = max(Extra.y, Radius);
-			Hits = 1;
-		}
-	}
-	if (Hits == 0)
-	{
-		return false;
-	}
 
 	// The wave-free surface: the Surface Mirror (drawn without the waves), the body's own water where the mirror has no texel, or the
-	// test bench's flat controlled water.
+	// test bench's flat controlled water. Taken at the cell's centre for all its lines (the water without the waves is smooth over a cell).
 	float Surface = ControlledHeight;
 	if (Controlled == 0)
 	{
@@ -449,21 +500,70 @@ bool RasterCell(uint3 GroupId, uint Lane, out int2 Cell, out float Head, out flo
 		Surface = Captured > FluidNinjaWaveNoWater * 0.5 ? Captured : Extra.z;
 	}
 	const float S = Surface - Translation.z;
-	// A body presses what of it is under the surface. For the lying swimmer that is its own submerged thickness, never the water over it:
-	// swimming just under the surface, the column from the surface down to the body pressed a pit as deep as the swimmer was down, and
-	// the surface spiked over it. (A hull and the capsule keep the column; they let it go as their top goes under.)
-	Head = Info.z == 2u ? max(0.0, min(S, Top) - Bottom) : max(0.0, S - Bottom);
-	// A column with water over it presses nothing: at rest the surface over a sunken part is flat. The surface draws B = η + P, so a P
-	// pressed there would stand up as a column of glassy water beside the body (a log speared in at an angle, a sinking ball's shoulders,
-	// the hollow a ball leaves behind it). It lets go over its fade length as the column's top goes under (the capsule's radius unless the
-	// record says otherwise): a treading swimmer's hips, a metre down, press no pit into the water over them, nor does a diver.
-	Head *= saturate(1.0 - (S - Top) / max(SubmergeFade > 0.0 ? SubmergeFade : (Info.z != 0u ? Extra.x : 2.0 * CellCm), 1.0));
-	// No pit deeper than the body is wide.
-	if (MaxHead > 0.0)
+	const float Fade = max(SubmergeFade > 0.0 ? SubmergeFade : (Info.z != 0u ? Extra.x : 2.0 * CellCm), 1.0);
+	float HeadSum = 0.0;
+	[unroll]
+	for (uint Sample = 0; Sample < FNB_WAVE_RASTER_SAMPLES; ++Sample)
 	{
-		Head = min(Head, MaxHead);
+		const float2 Line = P + FluidNinjaWaveRasterSample[Sample] * CellCm;
+		const uint Slot = Sample * FNB_WAVE_RASTER_LANES;
+		float LineBottom = RasterBottom[Slot];
+		// The column's top: a hull's highest crossing (every wave hull is a union of convex pieces, so a column inside it is solid up to there;
+		// a row boat's convex hull fills it to the gunwales), or the capsule's top.
+		float LineTop = RasterTop[Slot];
+		uint LineHits = RasterHits[Slot];
+		if (Info.z == 2u)
+		{
+			// Lying ellipsoid (a swimming body): semi-axes Extra.x along its facing (Axis' first column), Extra.y across, HalfThickness up;
+			// centred on the translation. Its depth tapers smoothly to nothing at its rim, as a body's does: the upright capsule seen from above
+			// is a disc with a vertical wall, a one-cell step from 0 to its whole column, which broke, spiked and threw short steep waves.
+			const float2 Offset = Line - Translation.xy;
+			const float Along = dot(Offset, float2(Axis0.x, Axis1.x)) / max(Extra.x, 1.0);
+			const float Across = dot(Offset, float2(Axis0.y, Axis1.y)) / max(Extra.y, 1.0);
+			const float Inside = 1.0 - Along * Along - Across * Across;
+			if (Inside <= 0.0 || HalfThickness <= 0.0)
+			{
+				continue;
+			}
+			const float Half = HalfThickness * sqrt(Inside);
+			LineBottom = -Half;
+			LineTop = Half;
+			LineHits = 1;
+		}
+		else if (Info.z != 0u)
+		{
+			// Upright capsule (the swimmer): radius Extra.x, half-height with the caps Extra.y, centred on the translation.
+			const float Radius = Extra.x;
+			const float2 Offset = Line - Translation.xy;
+			const float Across = dot(Offset, Offset);
+			if (Radius > 0.0 && Across < Radius * Radius)
+			{
+				LineBottom = -max(Extra.y - Radius, 0.0) - sqrt(Radius * Radius - Across);
+				LineTop = max(Extra.y, Radius);
+				LineHits = 1;
+			}
+		}
+		if (LineHits == 0)
+		{
+			continue;
+		}
+		// A body presses what of it is under the surface. For the lying swimmer that is its own submerged thickness, never the water over it:
+		// swimming just under the surface, the column from the surface down to the body pressed a pit as deep as the swimmer was down, and
+		// the surface spiked over it. (A hull and the capsule keep the column; they let it go as their top goes under.)
+		float LineHead = Info.z == 2u ? max(0.0, min(S, LineTop) - LineBottom) : max(0.0, S - LineBottom);
+		// A column with water over it presses nothing: at rest the surface over a sunken part is flat. The surface draws B = η + P, so a P
+		// pressed there would stand up as a column of glassy water beside the body (a log speared in at an angle, a sinking ball's shoulders,
+		// the hollow a ball leaves behind it). It lets go over its fade length as the column's top goes under (the capsule's radius unless the
+		// record says otherwise): a treading swimmer's hips, a metre down, press no pit into the water over them, nor does a diver.
+		LineHead *= saturate(1.0 - (S - LineTop) / Fade);
+		// No pit deeper than the body is wide.
+		if (MaxHead > 0.0)
+		{
+			LineHead = min(LineHead, MaxHead);
+		}
+		HeadSum += LineHead;
 	}
-	Head *= max(Extra.w, 0.0);
+	Head = HeadSum / float(FNB_WAVE_RASTER_SAMPLES) * max(Extra.w, 0.0);
 	return Head > 0.0;
 }
 
@@ -501,8 +601,8 @@ void SelfRasterCS(uint3 GroupId : SV_GroupID, uint Lane : SV_GroupIndex)
 // FNB_WAVE_SPLAT_MAX_SIGMA cells, normalised over the cells within 2.5 σ, so the impulse is kept whole), or bilinearly between the four
 // nearest below a quarter of a cell. Kept until a step consumes it.
 
-// bPool: into the pool slot from Base (a self field), else into ImpulseRW (a simulation).
-void AddUnits(int2 Cell, float Impulse, bool bPool, uint Base)
+// bPool: into the pool slot from Base (a self field), else into ImpulseRW (a simulation), and, for a steady piece (bSteady), into SteadyRW too.
+void AddUnits(int2 Cell, float Impulse, bool bPool, uint Base, bool bSteady)
 {
 	const int Units = int(round(clamp(Impulse * ImpulseFixedScale, -1.0e9, 1.0e9)));
 	if (Units != 0)
@@ -514,21 +614,28 @@ void AddUnits(int2 Cell, float Impulse, bool bPool, uint Base)
 		else
 		{
 			InterlockedAdd(ImpulseRW[Cell], asuint(Units));
+			if (bSteady)
+			{
+				InterlockedAdd(SteadyRW[Cell], asuint(Units));
+			}
 		}
 	}
 }
 
-void SplatImpulse(float4 Impulse, bool bPool, uint Base)
+void SplatImpulse(float4 Impulse, bool bPool, uint Base, bool bKeepSteady)
 {
 	if (!(abs(Impulse.z) < 1.0e8) || !all(abs(Impulse.xy) < 1.0e8))
 	{
 		return;   // not a finite number
 	}
 	const float2 T = Impulse.xy / CellCm - 0.5;
+	// A planing hull's steady piece carries its area negative (FStepResult::RippleImpulses): the area is its size either way.
+	const float PieceArea = abs(Impulse.w);
+	const bool bSteady = bKeepSteady && Impulse.w < 0.0;   // only a simulation's splat keeps them (SplatCS)
 	// At least Wave Source Smooth wide, and wider than the piece of hull it came from (a disc of its projected area has σ = r / 2): the
 	// water a slam drives down is taken up around the patch out to about its radius again on every side, the crown it throws. Pressed
 	// into its own patch alone, the 56 cm wrecking ball's one piece dug a pit far deeper than wide that sprang back as a spike.
-	const float AreaSigma = Impulse.w > 0.0 ? FNB_WAVE_SPLAT_SPREAD * 0.5 * sqrt(Impulse.w / FluidNinjaWavePi) / CellCm : 0.0;
+	const float AreaSigma = PieceArea > 0.0 ? FNB_WAVE_SPLAT_SPREAD * 0.5 * sqrt(PieceArea / FluidNinjaWavePi) / CellCm : 0.0;
 	const float Sigma = min(max(SmoothCells, AreaSigma), FNB_WAVE_SPLAT_MAX_SIGMA);
 	if (Sigma >= 0.25)
 	{
@@ -551,7 +658,7 @@ void SplatImpulse(float4 Impulse, bool bPool, uint Base)
 				if (InsideGrid(Cell))
 				{
 					const float2 D = float2(Cell) - T;
-					AddUnits(Cell, Impulse.z * exp(-dot(D, D) / (2.0 * Sigma * Sigma)) / Total, bPool, Base);
+					AddUnits(Cell, Impulse.z * exp(-dot(D, D) / (2.0 * Sigma * Sigma)) / Total, bPool, Base, bSteady);
 				}
 			}
 		}
@@ -566,7 +673,7 @@ void SplatImpulse(float4 Impulse, bool bPool, uint Base)
 		const int2 Cell = P0 + O;
 		if (InsideGrid(Cell))
 		{
-			AddUnits(Cell, Impulse.z * (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y), bPool, Base);
+			AddUnits(Cell, Impulse.z * (O.x != 0 ? F.x : 1.0 - F.x) * (O.y != 0 ? F.y : 1.0 - F.y), bPool, Base, bSteady);
 		}
 	}
 }
@@ -576,7 +683,7 @@ void SplatCS(uint3 Id : SV_DispatchThreadID)
 {
 	if (Id.x < uint(NumImpulses))
 	{
-		SplatImpulse(Impulses[Id.x], false, 0u);
+		SplatImpulse(Impulses[Id.x], false, 0u, HasSteady != 0);
 	}
 }
 
@@ -586,7 +693,7 @@ void SelfSplatCS(uint3 Id : SV_DispatchThreadID)
 {
 	if (Id.x < uint(NumImpulses))
 	{
-		SplatImpulse(Impulses[Id.x], true, SlotBase(int(ImpulseSlots[Id.x])));
+		SplatImpulse(Impulses[Id.x], true, SlotBase(int(ImpulseSlots[Id.x])), false);
 	}
 }
 
@@ -774,6 +881,61 @@ void AssembleCS(uint3 Id : SV_DispatchThreadID)
 		}
 	}
 	SourceOut[Cell] = float4(Head, Y, Erase, Speed);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The wash texture (interface version 6): each patch's Gaussian of foam rates summed per cell (a thread group z per patch over its box), then
+// the texture assembled with the steady impulse head.
+
+[numthreads(8, 8, 1)]
+void WashCS(uint3 GroupId : SV_GroupID, uint3 GroupThread : SV_GroupThreadID)
+{
+	const uint Record = GroupId.z;
+	if (Record >= uint(NumWashes))
+	{
+		return;
+	}
+	const uint4 Box = WashInfo[Record];   // min column, min row, columns, rows
+	const uint2 Local = GroupId.xy * 8 + GroupThread.xy;
+	if (Local.x >= Box.z || Local.y >= Box.w)
+	{
+		return;
+	}
+	const int2 Cell = int2(Box.xy + Local);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const float4 Place = WashData[Record * 2];
+	const float4 Rates = WashData[Record * 2 + 1];
+	const float2 Offset = CellCentre(Cell) - Place.xy;
+	const float Sigma = max(Place.z, 1.0);
+	const float Weight = exp(-dot(Offset, Offset) / (2.0 * Sigma * Sigma));
+	const uint Fresh = uint(round(clamp(Rates.x * Weight * WashFixedScale, 0.0, 1.0e9)));
+	const uint Aged = uint(round(clamp(Rates.y * Weight * WashFixedScale, 0.0, 1.0e9)));
+	if (Fresh > 0u)
+	{
+		InterlockedAdd(WashFreshRW[Cell], Fresh);
+	}
+	if (Aged > 0u)
+	{
+		InterlockedAdd(WashAgedRW[Cell], Aged);
+	}
+}
+
+[numthreads(8, 8, 1)]
+void WashAssembleCS(uint3 Id : SV_DispatchThreadID)
+{
+	const int2 Cell = int2(Id.xy);
+	if (!InsideGrid(Cell))
+	{
+		return;
+	}
+	const int3 Texel = int3(Cell, 0);
+	const float Fresh = float(WashFreshIn.Load(Texel)) / WashFixedScale;
+	const float Aged = float(WashAgedIn.Load(Texel)) / WashFixedScale;
+	const float Steady = HasSteadyIn != 0 ? float(asint(SteadyIn.Load(Texel))) * ImpulseToHead : 0.0;
+	WashOut[Cell] = float4(Fresh, Aged, Steady, 0.0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------

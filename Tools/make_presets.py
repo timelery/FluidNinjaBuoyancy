@@ -26,6 +26,8 @@ H = unreal.FluidNinjaPresetHull
 M = unreal.FluidNinjaPresetMass
 A = unreal.FluidNinjaPresetAttitude
 I = unreal.FluidNinjaBuoyancyInteraction
+F = unreal.FluidNinjaHullFlow
+P = unreal.FluidNinjaPropulsionModel
 
 # The class's defaults (FluidNinjaBuoyancyPreset.h), in the order of the header. Every preset writes all of them.
 DEFAULTS = {
@@ -53,6 +55,24 @@ DEFAULTS = {
     'splash_min_watts': 20.0,
     'max_splash_strength': 12.0,
     'splash_scale': 1.0,
+    'spray_sheets': False,
+    'spray_deadrise_deg': 18.0,
+    'hull_flow': F.DISPLACEMENT,
+    'planing_pressure_coefficient': 0.6,
+    'set_propulsion': False,
+    'propulsion_model': P.PROPELLER,
+    'engine_power_kw': 60.0,
+    'engine_max_rpm': 5800.0,
+    'gear_ratio': 2.0,
+    'prop_diameter_cm': 28.0,
+    'prop_pitch_ratio': 1.3,
+    'steerable_thrust': True,
+    'prop_location_share': unreal.Vector(-1.05, 0.0, -1.6),
+    'rudder_area_cm2': 500.0,
+    'max_rudder_angle': 30.0,
+    'keel_area_cm2': 0.0,
+    'keel_location_share': unreal.Vector(-0.35, 0.0, -1.0),
+    'keel_depth_cm': 15.0,
 }
 
 # The library. The key is the asset's name; 'description' is the preset's Description, the rest overrides DEFAULTS.
@@ -116,6 +136,14 @@ PRESETS = {
     'BoatHull': dict(
         description='A small boat\'s hull, 13 cm deep at rest, making wakes. Propulsion (Throttle and Rudder) is left to the component.',
         hull=H.FROM_COLLISION, hull_resolution_cm=30.0, mass=M.REST_DRAFT, rest_draft_cm=13.0, wake=True, splash_min_watts=300.0),
+    # A runabout: the planing law, an outboard's engine and propeller (steering with the drive) and spray sheets. The planing hull keeps
+    # its finest level (its bottom's facets carry it), so a 25 cm shell. A 2000 cm2 keel a third of the length from the stern holds it in
+    # its turns: the V-bottom's own grip against the slide is about a tenth of what a hard turn needs.
+    'Motorboat': dict(
+        description='A 4-6 m runabout with a 60 kW outboard: it climbs over the hump onto the plane, throws spray sheets and a rooster '
+                    'tail, and leaves a white propeller trail. Set Throttle (its sign shifts gear) and Rudder from Blueprint.',
+        hull=H.FROM_COLLISION, hull_resolution_cm=25.0, mass=M.REST_DRAFT, rest_draft_cm=14.0, wake=True, splash_min_watts=300.0,
+        spray_sheets=True, hull_flow=F.PLANING, set_propulsion=True, keel_area_cm2=2000.0),
 }
 
 

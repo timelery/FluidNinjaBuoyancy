@@ -22,5 +22,23 @@ FFluidNinjaWaveSimSettings UFluidNinjaWaveSimComponent::ToSettings() const
 	Out.WallBandCm = WallBandCm;
 	Out.ScaleDownOverride = ScaleDownOverride;
 	Out.Importance = Importance;
+	// Its damping, foam and surface, as the entry's fields of the same names.
+	Out.bOverrideDamping = bOverrideDamping;
+	Out.Damping = Damping;
+	Out.bOverrideFoamDecay = bOverrideFoamDecay;
+	Out.FoamDecay = FoamDecay;
+	Out.bOverrideFoamAgedDecay = bOverrideFoamAgedDecay;
+	Out.FoamAgedDecay = FoamAgedDecay;
+	Out.bOverrideFoamWake = bOverrideFoamWake;
+	Out.FoamWake = FoamWake;
+	Out.bOverrideFoamTransfer = bOverrideFoamTransfer;
+	Out.FoamTransfer = FoamTransfer;
+	Out.bOverrideFoamDiffusion = bOverrideFoamDiffusion;
+	Out.FoamDiffusion = FoamDiffusion;
+	Out.bOverrideFoamAgedDiffusion = bOverrideFoamAgedDiffusion;
+	Out.FoamAgedDiffusion = FoamAgedDiffusion;
+	Out.SurfaceScalars = SurfaceScalars;
+	Out.SurfaceColors = SurfaceColors;
+	Out.SurfaceTextures = SurfaceTextures;
 	return Out;
 }

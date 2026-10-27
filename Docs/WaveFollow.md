@@ -32,7 +32,7 @@ Every frame, after the waves' frame, the FluidNinja Buoyancy subsystem does thre
 4. Turn on **Evaluate World Position Offset** on the mesh components or foliage instances. It is on by default.
 5. Put the mesh's pivot at its waterline and place it at the water's still level. The function adds only the waves.
 
-LF's World Manager does this for its floating species by itself: it makes wave-following copies of each slot's material when it builds a biome's graph.
+A procedural foliage tool can do this for its floating species by itself: it makes wave-following copies of each material it places when it builds its graph.
 
 ## Settings
 

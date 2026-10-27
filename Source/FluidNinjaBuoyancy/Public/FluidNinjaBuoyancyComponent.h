@@ -2,9 +2,13 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Curves/CurveFloat.h"
+#include "FluidNinjaBuoyancyWash.h"
+#include "UObject/SoftObjectPath.h"
 #include "FluidNinjaBuoyancyComponent.generated.h"
 
 class UAudioComponent;
+class UNiagaraComponent;
 class UNiagaraSystem;
 class UPrimitiveComponent;
 class USoundAttenuation;
@@ -84,6 +88,42 @@ enum class EFluidNinjaHullModel : uint8
 	 * hull, fine for a ball, wrong for odd shapes.
 	 */
 	Spheres,
+};
+
+/** How the water's dynamic pressure acts on a Triangles hull (the component's Hull Flow; default Displacement). */
+UENUM(BlueprintType)
+enum class EFluidNinjaHullFlow : uint8
+{
+	/** Kerner's pressure drag and suction (Pressure Drag, Suction Drag and their falloffs): right for displacement hulls and props, the
+	 * plugin's behaviour before Hull Flow existed. */
+	Displacement,
+	/**
+	 * A planing hull (a motorboat, a runabout, a jet ski): the faces meeting the flow take Savitsky's planing pressure k · ½ρV² · cos θ
+	 * (Planing Pressure Coefficient k), so the bottom lifts with its trim and the boat climbs out of the water as it speeds up; the
+	 * suction behind the hull is capped at the local hydrostatic head (the water lets go of the transom: a ventilated stern); slams take
+	 * only the vertical entry speed; the hull pays the wave-making resistance of its own pressure (Havelock: the hump before it planes,
+	 * and the peak near the critical speed in shallow water); and the steady part of its pressure makes waves at its full weight. Triangles
+	 * hull model only (Voxels and Spheres ignore it); the hull stays at its finest level of detail.
+	 */
+	Planing,
+};
+
+/** How the propeller is driven (the component's Propulsion Model; default Simple). */
+UENUM(BlueprintType)
+enum class EFluidNinjaPropulsionModel : uint8
+{
+	/** Throttle × Max Thrust Newtons at Thrust Location while that point is under water; Prop Wash Speed washes the rudder. Rowing,
+	 * pushing, scripted propulsion; the plugin's behaviour before the propeller model existed. */
+	Simple,
+	/**
+	 * An engine and a propeller: Engine Power Kw at Engine Max Rpm through Gear Ratio to a propeller of Prop Diameter Cm and Prop Pitch
+	 * Ratio, with the open-water thrust and torque curves of a generic four-blade series (or your own Prop Thrust Curve and Prop Torque
+	 * Curve). Thrust falls as the boat speeds up (the advance ratio) until it meets the drag: the boat finds its own top speed. The throttle
+	 * lags (Engine Response Seconds), its sign shifts ahead, neutral and astern, the disc thrusts only as far as it is under water and
+	 * ventilates (loses grip, the engine flares) when it breaks the surface, the propeller's torque leans the hull, and its jet washes the
+	 * rudder. Readout: thrust, rpm, power, load, immersion, ventilation and the jet. Max Thrust Newtons and Prop Wash Speed are not used.
+	 */
+	Propeller,
 };
 
 /** A sphere standing in for part of the hull (body frame, cm): a pontoon. Used by the Spheres hull model (the component's Pontoons). */
@@ -183,6 +223,92 @@ struct FFluidNinjaBuoyancyReadout
 	/** The air's part of ForceN (drag on the dry hull from its own motion and the wind), world frame, newtons. */
 	UPROPERTY(BlueprintReadOnly, Category = "Buoyancy")
 	FVector WindForceN = FVector::ZeroVector;
+
+	/** The body's horizontal speed through the water (its velocity less the current under it), cm/s.
+	 * Read-only readout: 0 or more. */
+	UPROPERTY(BlueprintReadOnly, Category = "Buoyancy")
+	float SpeedThroughWaterCmS = 0.f;
+
+	/** How far the bow is raised: the body's forward axis (+X) against the horizontal, degrees (positive bow up). A planing hull trims bow
+	 * up at the hump (about 5-8°) and settles to 2-5° on the plane.
+	 * Read-only readout: -90 to 90. */
+	UPROPERTY(BlueprintReadOnly, Category = "Buoyancy")
+	float TrimDeg = 0.f;
+
+	/** Boats (Propulsion on, or a Keel Area above 0): the drift angle between the hull's heading (its +X, level) and its horizontal way
+	 * through the water at the centre of mass, degrees. Positive while the hull slides toward its right (+Y): a turn to the right (Rudder
+	 * positive) slides it out to its left and reads negative. A boat holding a hard turn drifts a few degrees to about 15-20°; a hull
+	 * that reads far more is skating sideways (give it a Keel Area). Near ±180 going astern. 0 below 50 cm/s, out of the water, and on
+	 * bodies with neither Propulsion nor a keel.
+	 * Read-only readout: -180 to 180. */
+	UPROPERTY(BlueprintReadOnly, Category = "Buoyancy")
+	float DriftAngleDeg = 0.f;
+
+	/** Keel Area above 0: the keel's side force against the slide this frame, newtons (its size; it pushes the hull back toward its
+	 * heading, at Keel Location). 0 without a keel, with the keel out of the water, and running straight.
+	 * Read-only readout: 0 or more. */
+	UPROPERTY(BlueprintReadOnly, Category = "Keel")
+	float KeelForceN = 0.f;
+
+	/** Hull Flow Planing: the wave-making resistance the hull pays this frame, newtons (its size; it acts against the body's way through
+	 * the water). It peaks at the hump (a length Froude number of about 0.5-0.7) and falls once the hull planes.
+	 * Read-only readout: 0 or more. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float WaveResistanceN = 0.f;
+
+	/** Propulsion: the propeller's push along its axis, newtons (negative astern). Simple: Throttle × Max Thrust Newtons while the thrust
+	 * point is under water. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float ThrustN = 0.f;
+
+	/** Propeller model: the engine's speed, rev/min (idle in neutral, the rev limit at full power). 0 under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float EngineRpm = 0.f;
+
+	/** Propeller model: the propeller shaft's speed, rev/min (negative astern; Engine Rpm ÷ Gear Ratio in gear). 0 under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float PropRpm = 0.f;
+
+	/** Propeller model: the power the propeller puts into the water, kilowatts. 0 under Simple.
+	 * Read-only readout: 0 or more. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float PropPowerKw = 0.f;
+
+	/** Propeller model: how hard the engine works, the water's torque over what the engine could give at this rpm at full throttle (0 idle
+	 * or neutral, 1 flat out). For the engine sound. 0 under Simple.
+	 * Read-only readout: 0 to 1.5. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float EngineLoad = 0.f;
+
+	/** Propeller model: the share of the propeller disc under the water, 0 (out) to 1 (fully under). Under 0.8 a loaded propeller
+	 * ventilates. 0 under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float PropImmersion = 0.f;
+
+	/** Propeller model: air is drawn down onto the blades (the disc broke the surface under load): thrust and torque drop to Ventilated
+	 * Thrust Factor and the engine flares; it clears once the disc has been fully under the water for 0.3 s. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	bool bPropVentilated = false;
+
+	/** Propeller model: the slipstream's speed through the water over the propeller's advance (the water's speed into the disc), cm/s, in
+	 * either gear: the white boil behind the stern grows with it. A little remains in neutral while the shaft spins down. Astern the jet
+	 * leaves forward, along -Prop Axis × Gear, and its whitewater with it. 0 under Simple.
+	 * Read-only readout: 0 or more. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	float PropJetExcessCmS = 0.f;
+
+	/** Propeller model: the gear, 1 ahead, 0 neutral, -1 astern (the throttle's sign; within ±0.02 of 0 is neutral). 0 under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	int32 Gear = 0;
+
+	/** Propeller model: the propeller disc's centre, world, cm (where to attach a prop-wash effect). Zero under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	FVector PropLocation = FVector::ZeroVector;
+
+	/** Propeller model: the thrust axis ahead, world, unit (turned with the drive on a steerable outboard; the jet leaves the other way
+	 * going ahead). +X under Simple. */
+	UPROPERTY(BlueprintReadOnly, Category = "Propulsion")
+	FVector PropAxis = FVector::ForwardVector;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FFluidNinjaBuoyancySlamSignature, float, Watts, FVector, Location);
@@ -397,6 +523,76 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Hydrodynamics", meta = (ClampMin = "0"))
 	FVector AngularDamping = FVector::ZeroVector;
 
+	/**
+	 * How the water's dynamic pressure acts on the hull (Triangles hull model only: Voxels and Spheres ignore it, and throw no stern wash or
+	 * rooster tail either).
+	 * - Displacement (the default): Kerner's pressure drag and suction above. Boats that push through the water (row boats, barges,
+	 *   sailing hulls), rafts and props.
+	 * - Planing: motorboats, runabouts, jet skis, anything meant to rise onto the plane. The bottom lifts by Savitsky's planing law
+	 *   (Planing Pressure Coefficient), the transom ventilates, the hull pays the wave-making resistance of its own pressure (Wave
+	 *   Resistance Scale: the hump before it planes), slams take only the vertical entry, and the steady pressure makes waves at its full
+	 *   weight (Wave Planing Pressure Scale in the project settings). Pressure Drag Linear, Pressure Drag Quadratic and Pressure Falloff
+	 *   are not used on the faces meeting the flow (the suction keeps its settings, capped). The hull stays at its finest level of detail.
+	 * Pair Planing with Propulsion Model Propeller: a constant push has no power limit and drives a planing hull far past any real top speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hydrodynamics")
+	EFluidNinjaHullFlow HullFlow = EFluidNinjaHullFlow::Displacement;
+
+	/** Hull Flow Planing: k of the planing law, the share of the dynamic pressure ½ρV² a face meeting the flow takes, times its incidence
+	 * (a bottom at trim τ lifts k ½ρV² sin τ per unit area; a face meeting the flow head-on stagnates at k ½ρV²). Savitsky's planing
+	 * coefficients come out at about 0.4 (a long, narrow wetted bottom) to 0.8 (a short, wide one); 0.6 fits a 5 m runabout. Higher lifts
+	 * the hull sooner and planes it at a flatter trim, and adds the same share of drag; lower lets it ride deeper and trim higher. Default
+	 * 0.6. Range 0.1-1.5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hydrodynamics", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0.1", ClampMax = "1.5"))
+	float PlaningPressureCoefficient = 0.6f;
+
+	/** Hull Flow Planing: scales the wave-making resistance, the drag the waves the hull's own pressure radiates take from it (Havelock's
+	 * integral over its wet pieces, at the depth under it). 1 is physical: on a 5 m, 1 t runabout about 0.45 kN at the hump (5 m/s), 0.25
+	 * kN at 10 m/s, 0.14 kN at 15 m/s, and a peak in shallow water near the critical speed √(gh). Higher deepens the hump the boat has to
+	 * climb before it planes; 0 turns it off (no hump). Evaluated 30 times a second and smoothed over 0.25 s. Default 1. Range 0-3. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hydrodynamics", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "3"))
+	float WaveResistanceScale = 1.f;
+
+	/**
+	 * The keel: the hull's lateral plane under the water that resists sliding sideways (keel, skeg, a jet ski's pump housing, strakes and
+	 * chines), in cm². It acts as a low-aspect-ratio wing at Keel Location: while the hull runs at u and slides across its heading at v
+	 * (through the water, the current taken off), the water pushes back against the slide with ½ρ × this area × ((π AR / 2) × |u| × v +
+	 * Keel Crossflow Coefficient × v × |v|), and the slide costs the induced drag ½ρ × this area × (π AR / 4) × v² against the way ahead
+	 * (AR = 2 × Keel Depth Cm² ÷ this area). The force scales with the share of Keel Depth Cm under the water: a hull riding high grips
+	 * less, and in the air not at all. Any Hull Model and Hull Flow, with or without Propulsion.
+	 * The main knob for a boat that slides through its turns: more area, less slide. A planing V-bottom's own grip against the slide goes
+	 * with sin² of its deadrise (about a tenth of the dynamic pressure at 18°), and Rudder Area Cm2 does not resist sliding at all (its
+	 * force follows only the rudder's angle), so a planing hull without a keel skates outward in a hard turn. Typical: a jet ski
+	 * 1000-2000 (Keel Location about a third of its length from the stern, at the keel line); a 5 m runabout 1500-3000; an 8 m RIB
+	 * 4000-8000; 0 for floating props, which should drift freely. Get Readout → Drift Angle Deg and Keel Force N show its effect.
+	 * Default 0 (off). At least 0.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Keel", meta = (ClampMin = "0"))
+	float KeelAreaCm2 = 0.f;
+
+	/** Where the keel's side force acts: the centre of its lateral area (the hull's centre of lateral resistance), in the body's frame: cm
+	 * from the floating primitive's origin along its axes, at world size (the component's scale is not applied), as Thrust Location. Its
+	 * Z is the middle of Keel Depth Cm: put it at the keel line (the hull's bottom). Aft of the centre of mass (a jet ski or runabout:
+	 * about a third of the length from the stern) the force also resists yawing and keeps the boat running straight, as a skeg does; near
+	 * the centre of mass it fights the slide alone and leaves the turning to the rudder; forward of it the boat turns into its own slide
+	 * and can spin out. Well below the centre of mass it also heels the boat outward in a hard turn, as a sailing keel does: raise it
+	 * toward the centre of mass (it still has to be under the water) if the boat leans out too far. Default 0 (the origin). */
+	UPROPERTY(EditAnywhere, Category = "Keel", meta = (EditCondition = "KeelAreaCm2 > 0", Units = "cm"))
+	FVector KeelLocation = FVector::ZeroVector;
+
+	/** The keel's vertical span, centred on Keel Location. The share of it under the water scales the force (a hull riding high on the
+	 * plane grips less, an airborne one not at all), and with Keel Area Cm2 it sets the keel's aspect ratio AR = 2 × span² ÷ area (the
+	 * hull above mirrors it): a deeper keel of the same area grips harder at a small slide. Typical: a jet ski or runabout 10-20; an 8 m
+	 * RIB 20-30; a sailing yacht's fin keel 100 or more. In cm. Default 15. At least 1. */
+	UPROPERTY(EditAnywhere, Category = "Keel", meta = (EditCondition = "KeelAreaCm2 > 0", ClampMin = "1", Units = "cm"))
+	float KeelDepthCm = 15.f;
+
+	/** The crossflow drag coefficient of the slide: the part of the keel's force that grows with the square of the sideways speed (this ×
+	 * v × |v|). It holds a hull sliding at a large angle, or drifting sideways at a crawl, where the lift part (which needs way ahead)
+	 * fades. 1 suits a keel or a flat hull side; higher grips harder at large slides; 0 leaves the lift alone. Default 1. Range 0-2. */
+	UPROPERTY(EditAnywhere, Category = "Keel", meta = (EditCondition = "KeelAreaCm2 > 0", ClampMin = "0", ClampMax = "2"), AdvancedDisplay)
+	float KeelCrossflowCoefficient = 1.f;
+
 	/** A propeller and rudder (body frame, the bow along +X). Throttle and Rudder are set from Blueprint, or the console for testing
 	 * (fnb.Boat.Throttle, fnb.Boat.Rudder) when Console Control is on. Default off. */
 	UPROPERTY(EditAnywhere, Category = "Propulsion")
@@ -407,8 +603,101 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion"))
 	bool bConsoleControl = true;
 
+	/** How the propeller is driven. Simple (the default): Throttle × Max Thrust Newtons while the thrust point is under the water, and Prop
+	 * Wash Speed over the rudder; for rowing, paddles, scripted pushes. Propeller: an engine (Engine Power Kw, Engine Max Rpm, Engine
+	 * Response Seconds) through Gear Ratio to a propeller (Prop Diameter Cm, Prop Pitch Ratio) with real open-water curves: the boat finds
+	 * its own acceleration and top speed, the throttle's sign shifts gear, the disc ventilates when it breaks the surface, its torque leans
+	 * the hull and its jet washes the rudder; for motorboats (pair it with Hull Flow Planing). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion"))
+	EFluidNinjaPropulsionModel PropulsionModel = EFluidNinjaPropulsionModel::Simple;
+
+	/** Propeller model: the engine's power at Engine Max Rpm, kilowatts (hp × 0.746). More gives harder acceleration and, with a propeller
+	 * sized for it, a higher top speed. A 5 m runabout: 40-90 kW; a jet ski 80-230; a 7 m wake boat 250-350. Default 60. Range 1-2000. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "1", ClampMax = "2000"))
+	float EnginePowerKw = 60.f;
+
+	/** Propeller model: the engine's rev limit, rev/min, where it gives Engine Power Kw (its torque peaks lower, at 1.25 times the rated
+	 * torque from a standstill). An outboard: 5000-6300; an inboard: 3000-5500. Higher, with the same gear and propeller, lets the
+	 * propeller turn faster and the boat go faster if the engine has the power. Default 5800. Range 1000-15000. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "1000", ClampMax = "15000"))
+	float EngineMaxRpm = 5800.f;
+
+	/** Propeller model: the engine's idle, rev/min: in gear at no throttle the propeller turns at this ÷ Gear Ratio and the boat creeps
+	 * (zero throttle is neutral: no creep). Default 800. Range 300 up to 0.9 × Engine Max Rpm. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "300"), AdvancedDisplay)
+	float EngineIdleRpm = 800.f;
+
+	/** Propeller model: how long the engine takes to catch up with the throttle (the time to close about two thirds of a change), s.
+	 * Longer feels heavier and slower to answer; shorter snaps. Default 0.4. Range 0.01-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0.01", ClampMax = "5", Units = "s"))
+	float EngineResponseSeconds = 0.4f;
+
+	/** Propeller model: the engine's turns per propeller turn (an outboard's lower unit: 1.8-2.6; an inboard's gearbox: 1-3). Higher turns
+	 * the propeller slower and pushes harder at low speed; lower spins it faster for top speed. Default 2. Range 0.25-10. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0.25", ClampMax = "10"))
+	float GearRatio = 2.f;
+
+	/** Propeller model: the propeller's diameter, cm. The power it can absorb grows with the fifth power of it: too big and the engine never
+	 * reaches its rev limit (slow, strong), too small and it over-revs (fast, weak at low speed). Size it with Prop Pitch Ratio for the
+	 * engine: a 60 kW outboard turns about a 28 cm (11 in) propeller; a 250 kW inboard about 40 cm. Default 28. Range 5-300. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "5", ClampMax = "300", Units = "cm"))
+	float PropDiameterCm = 28.f;
+
+	/** Propeller model: the pitch over the diameter: how far one turn would screw the propeller forward, over its diameter. Higher pushes
+	 * the boat faster at the same rpm (and loads the engine more); lower climbs out of the hole harder and tops out sooner. Planing boats:
+	 * 1.1-1.6; displacement hulls and tugs: 0.6-1.0. It sets the generic four-blade curves (when Prop Thrust Curve and Prop Torque Curve
+	 * are empty). Default 1.3. Range 0.4-2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0.4", ClampMax = "2"))
+	float PropPitchRatio = 1.3f;
+
+	/** Propeller model: an outboard or a sterndrive: the propeller's thrust turns with the rudder angle (Max Rudder Angle × Rudder), so it
+	 * steers hard even at low speed; Rudder Area Cm2 then stands for the lower unit's own side force, which lifts on the boat's own flow
+	 * alone (the unit turns with its own jet, so neither the jet nor Prop Wash Speed adds to it). Off: a fixed shaft and a rudder in its
+	 * wash. Simple uses it too. Default off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (EditCondition = "bPropulsion"))
+	bool bSteerableThrust = false;
+
+	/** Propeller model, optional: the propeller's thrust coefficient KT against the advance ratio J = Va / (n D) (Va the water's speed into
+	 * the disc, n its rev/s, D its diameter), ahead, for J from 0 up. Empty (the default): the generic four-blade series for Prop Pitch
+	 * Ratio. Use a manufacturer's open-water curve for a specific propeller (KQ goes in Prop Torque Curve; both or neither). */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller"), AdvancedDisplay)
+	FRuntimeFloatCurve PropThrustCurve;
+
+	/** Propeller model, optional: the propeller's torque coefficient KQ against the advance ratio J, ahead (see Prop Thrust Curve). Used
+	 * only with Prop Thrust Curve. Empty (the default): the generic series. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller"), AdvancedDisplay)
+	FRuntimeFloatCurve PropTorqueCurve;
+
+	/** Propeller model: the hull's wake at the propeller: it meets the water at (1 - this) of the boat's speed through it. Planing hulls
+	 * and outboards: 0-0.1; displacement hulls with the shaft under the hull: 0.15-0.35. Higher loads the propeller more at speed.
+	 * Default 0.05. Range 0-0.9. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0", ClampMax = "0.9"), AdvancedDisplay)
+	float PropWakeFraction = 0.05f;
+
+	/** Propeller model: astern, the propeller's thrust and torque coefficients are this share of ahead's (its blades work backwards).
+	 * Default 0.6. Range 0-1. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0", ClampMax = "1"), AdvancedDisplay)
+	float ReverseEfficiency = 0.6f;
+
+	/** Propeller model: while the propeller is ventilated (air drawn onto its blades), its thrust and torque are this share of what they
+	 * would be: the boat bogs and the engine flares. Lower makes ventilation harsher. Default 0.45. Range 0-1. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0", ClampMax = "1"), AdvancedDisplay)
+	float VentilatedThrustFactor = 0.45f;
+
+	/** Propeller model: the engine's and gearbox's rotating parts, at the engine shaft, kg·m². More makes the rpm answer the throttle and
+	 * the load more slowly. An outboard's: about 0.05-0.15; an inboard's with flywheel 0.2-1. Default 0.1. At least 0.001. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0.001"), AdvancedDisplay)
+	float EngineInertiaKgM2 = 0.1f;
+
+	/** Propeller model: a left-handed propeller (anticlockwise seen from astern going ahead): its torque leans the hull to starboard instead
+	 * of to port. Default off (right-handed). */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller"), AdvancedDisplay)
+	bool bLeftHandedProp = false;
+
 	/** Where the propeller pushes, in the body's frame: cm from the floating primitive's origin along its axes, at world size (the
-	 * component's scale is not applied). It pushes only while this point is under the water. Default 0 (the origin). */
+	 * component's scale is not applied). Simple: it pushes only while this point is under the water. Propeller: the disc's centre (it
+	 * pushes by the share of the disc under the water): put it below the hull's bottom at the stern, as an outboard's propeller hangs.
+	 * Default 0 (the origin). */
 	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion", Units = "cm"))
 	FVector ThrustLocation = FVector::ZeroVector;
 
@@ -417,15 +706,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion"))
 	FVector ThrustDirection = FVector::ForwardVector;
 
-	/** The propeller's push at Throttle 1 (and astern at -1), newtons. More drives the boat faster and accelerates it harder. Default
+	/** Propulsion Model Simple only: the propeller's push at Throttle 1 (and astern at -1), newtons. More drives the boat faster and
+	 * accelerates it harder. The Propeller model does not use it (its thrust comes from the engine and the propeller's curves). Default
 	 * 1500. At least 0; 0 gives no thrust. */
-	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion", ClampMin = "0"))
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Simple", ClampMin = "0"))
 	float MaxThrustNewtons = 1500.f;
 
-	/** The propeller's wash over the rudder at full throttle, so the boat steers when slow: added to the water's speed past the rudder,
-	 * times Throttle (astern takes it away). Higher steers harder at low speed; 0 leaves the rudder to the boat's own speed. In cm/s.
-	 * Default 300. At least 0. */
-	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion", ClampMin = "0", Units = "cm/s"))
+	/** Propulsion Model Simple with a fixed shaft (Steerable Thrust off) only: the propeller's wash over the rudder at full throttle, so the
+	 * boat steers when slow: added to the water's speed past the rudder, times Throttle (astern takes it away). Higher steers harder at
+	 * low speed; 0 leaves the rudder to the boat's own speed. The Propeller model takes the wash from its own jet, and a steerable drive
+	 * gets none (its thrust already swings). In cm/s. Default 300. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Simple && !bSteerableThrust", ClampMin = "0", Units = "cm/s"))
 	float PropWashSpeed = 300.f;
 
 	/** Where the rudder sits, in the body's frame: cm from the floating primitive's origin along its axes, at world size (the component's
@@ -436,8 +727,9 @@ public:
 	FVector RudderLocation = FVector::ZeroVector;
 
 	/** The rudder blade's area, cm²: its side force grows with it and with the square of the water's speed past the rudder (the boat's
-	 * speed through the water plus the propeller's wash). Bigger turns the boat harder. Default 900 (a 30 x 30 cm blade). At least 0; 0:
-	 * no rudder. */
+	 * speed through the water plus the propeller's wash behind a fixed shaft; a steerable drive's lower unit takes the boat's speed alone).
+	 * Bigger turns the boat harder. It does not resist the hull sliding sideways (its force follows only the rudder's angle): give a boat
+	 * that slides through its turns a Keel Area Cm2. Default 900 (a 30 x 30 cm blade). At least 0; 0: no rudder. */
 	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion", ClampMin = "0"))
 	float RudderAreaCm2 = 900.f;
 
@@ -447,8 +739,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Propulsion", meta = (EditCondition = "bPropulsion", ClampMin = "0", ClampMax = "60", Units = "deg"))
 	float MaxRudderAngle = 35.f;
 
-	/** The propeller's setting: -1 (full astern) to 1 (full ahead), a share of Max Thrust Newtons; 0 (the default) stops it. Clamped to
-	 * that range. Set it from Blueprint, or with fnb.Boat.Throttle when Console Control is on. Needs Propulsion on. */
+	/** The propeller's setting: -1 (full astern) to 1 (full ahead); 0 (the default) stops it. Clamped to that range. Simple: a share of Max
+	 * Thrust Newtons. Propeller: |Throttle| is the engine's throttle, which the engine catches up with over Engine Response Seconds; its
+	 * sign selects the gear (ahead above 0, astern below 0), and within ±0.02 of 0 the drive is in neutral with the engine idling; Max
+	 * Thrust Newtons is not used. Set it from Blueprint, or with fnb.Boat.Throttle when Console Control is on. Needs Propulsion on. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Propulsion", meta = (ClampMin = "-1", ClampMax = "1"))
 	float Throttle = 0.f;
 
@@ -494,7 +788,9 @@ public:
 	EFluidNinjaBuoyancyInteraction Interaction = EFluidNinjaBuoyancyInteraction::FluidNinjaTracking;
 
 	/** Brush size of each wake point at a push of 2 m/s (scaled 0.4–2x with the push, so 24 to 120 cm at the default); the impact
-	 * burst's points use it too. Bigger stirs a wider band of water around the hull. In cm. Default 60. At least 1. */
+	 * burst's points use it too. Bigger stirs a wider band of water around the hull. Scale it with the hull: 60 suits an 8 m planing
+	 * boat, while on a short, fast hull (a 5.5 m airboat at 17 m/s) it draws a white halo and a wedge of lace, and about 25 cm keeps the
+	 * lanes dark. In cm. Default 60. At least 1. */
 	UPROPERTY(EditAnywhere, Category = "Wake", meta = (EditCondition = "bWake", ClampMin = "1", Units = "cm"))
 	float WakeBrushSizeCm = 60.f;
 
@@ -599,6 +895,225 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Spray", meta = (ClampMin = "0.02", Units = "s"))
 	float SplashInterval = 0.12f;
 
+	/** Continuous spray sheets while the hull drives fast through the water: a whisker sheet off each side where the water line drives
+	 * in hardest (the chines of a planing hull), launched at 2 V sin β (V the hull's speed through the water, β Spray Deadrise Deg) out
+	 * and up, and a rooster tail behind a fast propelled stern. Persistent Niagara emitters (Spray Sheet System) that follow the hull,
+	 * outside the slam splashes' budget; where their drops come down they leave fresh foam (Spray Landing Foam; FluidNinja Waves
+	 * interface version 6). Drawn only within Lod Distances Y, while the body is seen and awake, and while fnb.Effects.SpraySheets is on
+	 * (sg.WaterQuality: off at Low and Medium). Default off; the Motorboat preset turns it on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spray|Sheets")
+	bool bSpraySheets = false;
+
+	/** The spray sheets' Niagara system: it must take the user parameters SprayRate (particles/s), SprayVelocity (world cm/s), SprayCone
+	 * (degrees), DropletSize (cm) and WaterZ (cm, where drops die). None (the default): the project default (Project Settings → FluidNinja
+	 * Buoyancy → Effects → Spray Sheet System; NS_FNB_HullSpray as the plugin ships). */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets"))
+	TSoftObjectPtr<UNiagaraSystem> SpraySheetSystem;
+
+	/** The sheets start when the hull drives through the water at least this fast (and stop below 85 % of it). Lower lets a slower hull
+	 * throw sheets. In cm/s. Default 400 (where a runabout is climbing onto the plane). At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets", ClampMin = "0", Units = "cm/s"))
+	float SpraySheetMinSpeedCmS = 400.f;
+
+	/** The hull bottom's deadrise, degrees: the V of a planing bottom. The whisker sheet leaves at 2 V sin β in the water's frame, so a
+	 * deeper V throws it faster and higher (18°: 6.2 m/s at 10 m/s). Flat bottoms 0-10, runabouts 14-20, deep-V offshore hulls 22-26.
+	 * Default 18. Range 0-45. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets", ClampMin = "0", ClampMax = "45", Units = "deg"))
+	float SprayDeadriseDeg = 18.f;
+
+	/** Scales how many drops each sheet throws (their spawn rate), not how fast or high. Higher thickens the sheets (more particles drawn);
+	 * lower thins them. fnb.Effects.SprayRateScale scales it again (sg.WaterQuality). Default 1. Range 0-4. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets", ClampMin = "0", ClampMax = "4"))
+	float SpraySheetRate = 1.f;
+
+	/** A rooster tail: a plume thrown up behind the stern of a fast propelled planing hull (Propulsion on and Hull Flow Planing on the
+	 * Triangles hull model; other hulls throw none), rising with the speed (up to about 7 m/s up) and falling behind the boat. Default on;
+	 * turn it off for a hull that should throw only its chine sheets. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets"))
+	bool bRoosterTail = true;
+
+	/** The rooster tail starts at this speed through the water (and stops below 85 % of it). In cm/s. Default 800. At least 0. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets && bRoosterTail", ClampMin = "0", Units = "cm/s"))
+	float RoosterTailMinSpeedCmS = 800.f;
+
+	/** Fresh foam where the sheets' drops come down (predicted from their launch, the water's height and gravity), foam per second at the
+	 * landing patch's centre per unit of sheet. Higher leaves whiter lines beside and behind the hull; 0 none. Needs FluidNinja Waves
+	 * interface version 6 and the foam on. Default 1. Range 0-5. */
+	UPROPERTY(EditAnywhere, Category = "Spray|Sheets", meta = (EditCondition = "bSpraySheets", ClampMin = "0", ClampMax = "5"))
+	float SprayLandingFoam = 1.f;
+
+	/** The propeller's whitewater (Propulsion on, Propulsion Model Propeller): the jet's boil behind the stern as fresh foam and the
+	 * bubbles it drags down as aged foam (FluidNinja Waves' second foam channel, the long pale trail), stronger with the jet's excess speed
+	 * and how much of the disc is under the water; astern it runs forward with the jet. Higher whitens the trail; 0 none. Needs FluidNinja
+	 * Waves interface version 6 and the foam on. Default 1. Range 0-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0", ClampMax = "5"))
+	float PropWashFoam = 1.f;
+
+	/** The stern's whitewater (Hull Flow Planing on the Triangles hull model): once the transom runs dry (about 2.5 √(g × the rest draft),
+	 * 2.9 m/s for a 14 cm draft) the water closing behind it breaks into a white trail about a beam wide. Higher whitens it; 0 none. Needs
+	 * FluidNinja Waves interface version 6 and the foam on. Default 1. Range 0-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "5"))
+	float SternWashFoam = 1.f;
+
+	/** How many propeller jets the propeller's whitewater (Prop Wash Foam) comes from. The propeller model drives one propeller; a boat
+	 * with twin (or triple, quad) outboards gets its thrust from it, but its trail is drawn from this many jets side by side, Prop Wash Jet
+	 * Spacing Cm apart: two white streams that merge into one broad band a few metres behind the stern. Default 1; range 1-4. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "1", ClampMax = "4", UIMin = "1", UIMax = "4"))
+	int32 PropWashJets = 1;
+
+	/** The distance between neighbouring propeller jets (Prop Wash Jets above 1), cm, centred on Thrust Location. Twin outboards on a
+	 * 7-9 m boat sit about 65-80 cm apart. Default 70; at least 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller && PropWashJets > 1", ClampMin = "0", Units = "cm"))
+	float PropWashJetSpacingCm = 70.f;
+
+	/** How fast the propeller's white trail (Prop Wash Foam) widens behind the stern, degrees each side: the jets' boil spreads at about
+	 * this angle and the trail's sideways scatter grows with it. Lower keeps a narrow, transom-wide stream with dark water beside it (a
+	 * planing boat's prop wash on open water: 1-3); higher fans it out into a broad band (a slow, heavy boat's churn: 6-10). Default 7;
+	 * range 0-20. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller", ClampMin = "0", ClampMax = "20", Units = "deg"))
+	float PropWashSpreadDeg = 7.f;
+
+	/** An airboat's centre trail: its air propeller blows the slipstream back over the stern and down onto the water behind it, which
+	 * ruffles and whitens a milder trail than a submerged propeller's boil: one broad, soft stream about the fan's width, from the transom
+	 * back, widening at Air Fan Wash Spread Deg and fading aft. The hull's own quarter wakes, stern churn and sides form around it as on any
+	 * planing hull. Its strength follows Air Fan Throttle, which the owner sets every frame from its own engine; the component applies no
+	 * thrust for it, so keep Propulsion off and let the Blueprint push the boat at its fan. Use it instead of Prop Wash Foam on a boat driven
+	 * by an air fan. Higher whitens the trail; 0 none (the default). An airboat's trail is about a third to a half as white as a
+	 * twin-outboard boat's (Prop Wash Foam 0.7): 0.2-0.4. Needs the hull moving, FluidNinja Waves interface version 6 and the foam on.
+	 * Range 0-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake|Air Fan", meta = (ClampMin = "0", ClampMax = "5"))
+	float AirFanWashFoam = 0.f;
+
+	/** How hard the air fan blows now, 0-1, for Air Fan Wash Foam: set it every frame from the owner's engine (an airboat Blueprint's
+	 * applied throttle). 0 lays no fan wash, 1 the full Air Fan Wash Foam. Runtime state, not saved. Default 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Transient, Category = "Wake|Air Fan", meta = (ClampMin = "0", ClampMax = "1"))
+	float AirFanThrottle = 0.f;
+
+	/** The air fan's hub, cm, in the hull primitive's space (as Thrust Location): the fan wash's stream is centred on its Y and starts at
+	 * the transom, or at the fan if the fan hangs behind the transom. Its height does not matter. Default (0, 0, 0). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake|Air Fan", meta = (EditCondition = "AirFanWashFoam > 0"))
+	FVector AirFanLocation = FVector::ZeroVector;
+
+	/** The air fan's diameter, cm: the fan wash's stream starts about this wide and runs about four diameters plus most of the hull's
+	 * length behind the transom before it has lost its strength. Airboat propellers are 150-210 cm. Default 180; range 50-400. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake|Air Fan", meta = (EditCondition = "AirFanWashFoam > 0", ClampMin = "50", ClampMax = "400", Units = "cm"))
+	float AirFanDiameterCm = 180.f;
+
+	/** How fast the fan wash's stream widens behind the stern, degrees each side: an air propeller's slipstream spreads more than a water
+	 * jet, about 8-12 degrees. Lower keeps a narrow centre streak; higher fans it into a broad, faint band. Default 10; range 0-30. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake|Air Fan", meta = (EditCondition = "AirFanWashFoam > 0", ClampMin = "0", ClampMax = "30", Units = "deg"))
+	float AirFanWashSpreadDeg = 10.f;
+
+	/** The quarter wakes' whitewater (Hull Flow Planing on the Triangles hull model): the diverging waves a fast hull throws off its transom
+	 * corners break, and leave two ragged white bands that spread outward behind the boat at the wake angle, with darker water between
+	 * them and the propeller's trail. The angle narrows with speed as for real planing boats (Kelvin's 19.5 degrees at low Froude numbers,
+	 * about 1 / (sqrt(2 pi) Fr) above; 14 degrees for an 8 m boat at 15 m/s); the bands start near the hump and are whitest on the plane.
+	 * Higher whitens them; 0 none. Needs FluidNinja Waves interface version 6 and the foam on. Default 1; range 0-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "5"))
+	float QuarterWakeFoam = 1.f;
+
+	/** How far behind the transom the quarter wakes keep breaking, in hull lengths. Longer draws longer white bands (and spreads the same
+	 * foam over them). Default 4; range 0.5-10. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0", ClampMin = "0.5", ClampMax = "10"))
+	float QuarterWakeLength = 4.f;
+
+	/** Scales the angle the quarter wakes' white bands run out at, from the wake angle the speed gives (Quarter Wake Foam). The breaking
+	 * crests of a planing hull's quarter waves stay closer to its track than the wave pattern's own edge: photographed twin-outboard boats
+	 * show band centres about half the wake angle out, the bands widening outward. 1 lays them along the wake angle; 0.5 at half of it.
+	 * Default 1; range 0.2-1.5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0", ClampMin = "0.2", ClampMax = "1.5"))
+	float QuarterWakeAngleScale = 1.f;
+
+	/** How far behind the transom the quarter wakes start breaking, in hull lengths. The quarter waves steepen for a few metres behind the
+	 * transom before their crests break, so a fast boat's white arms begin out beside its track and leave dark water between them and the
+	 * propeller's trail; foam laid right at the transom corners is left behind as two lines along the track that fill that dark water.
+	 * 0 starts them at the corners; 0.2-0.4 gives the dark lanes of a planing boat's wake. Default 0; range 0-2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0", ClampMin = "0", ClampMax = "2"))
+	float QuarterWakeStart = 0.f;
+
+	/** How far outside each transom corner its quarter wake starts breaking, in hull beams. A planing hull's quarter waves rise just outside
+	 * its chines and break there, so a fast boat's white arms begin a little out from its sides and leave dark water between them and the
+	 * propeller's trail from the transom on, where Quarter Wake Start would move the arms' start aft instead. 0 starts them at the corners;
+	 * 0.1-0.3 gives the dark lanes of a twin-outboard boat's wake right behind its transom. Default 0; range 0-1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0", ClampMin = "0", ClampMax = "1"))
+	float QuarterWakeOffset = 0.f;
+
+	/** The quarter wakes' breaking crests: the white arms gather into diagonal streaks, one per crest, which stay on the water where they
+	 * broke and give the arms the saw-toothed outer edge of a real planing wake (the crests run outward and aft at about 55 degrees to the
+	 * track, square to the waves at Kelvin's cusp). The streaks' spacing along the track, in cm; a planing boat's crests break about every
+	 * 2-4 m. 0 lays even arms. Default 0; range 0-2000. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0", ClampMin = "0", ClampMax = "2000", Units = "cm"))
+	float QuarterWakeCrestSpacingCm = 0.f;
+
+	/** How much of the quarter wakes' foam gathers on their breaking crests (Quarter Wake Crest Spacing Cm): 0 even arms, 1 white streaks
+	 * with darker water between them. The arms keep the same foam overall. Default 0.6; range 0-1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeFoam > 0 && QuarterWakeCrestSpacingCm > 0", ClampMin = "0", ClampMax = "1"))
+	float QuarterWakeCrestStrength = 0.6f;
+
+	/** The stern ridge (Hull Flow Planing on the Triangles hull model): the water closing behind a planing hull's dry transom rises into a
+	 * ridge along its track, the mound a rooster tail stands on, heaped up further by the propellers' boil. A linear wake of the hull's
+	 * own pressure leaves a hollow there for tens of metres instead, so seen from the stern a fast boat's wake shows a trench where a real
+	 * one shows a raised white ridge. This pushes the water up behind the transom once it runs dry, steadily as the planing pressure goes
+	 * in (no impact foam), from the transom back over Stern Ridge Length, strongest half way. The head of the push, in cm: the mound it
+	 * would raise standing still; under way the waves carry it aft and lower it. The boat does not feel its own ridge. 0 (the default):
+	 * none; 15-40 lifts a fast twin-outboard boat's centre line into a ridge. Range 0-80. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "80", Units = "cm"))
+	float SternRidgeHeightCm = 0.f;
+
+	/** How far behind the transom the stern ridge's push reaches, in hull lengths (Stern Ridge Height Cm). Longer lifts a longer stretch
+	 * of the track. Default 1; range 0.1-4. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && SternRidgeHeightCm > 0", ClampMin = "0.1", ClampMax = "4"))
+	float SternRidgeLength = 1.f;
+
+	/** The stern ridge's width at half its height, in hull beams (Stern Ridge Height Cm). Twin outboards' ridge is about half a beam wide.
+	 * Wider spreads the same head over more water. Default 0.5; range 0.1-2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && SternRidgeHeightCm > 0", ClampMin = "0.1", ClampMax = "2"))
+	float SternRidgeWidth = 0.5f;
+
+	/** The quarter waves' lift (Hull Flow Planing on the Triangles hull model): the divergent waves a planing stern throws off its quarters
+	 * stand up as two white walls running out behind it, where a linear wake of the hull's own pressure leaves them a few centimetres
+	 * high. This pushes the water up along each quarter wake's line (where its white band runs: Quarter Wake Start behind the corner,
+	 * Quarter Wake Offset outside it, at the wake angle the speed and Quarter Wake Angle Scale give), steadily as the planing pressure goes
+	 * in (no impact foam), strongest half way along Quarter Wake Lift Length, once the hull is on the plane. The head of the push, in cm:
+	 * the mound it would raise standing still. The boat does not feel it. 0 (the default): none; 15-35 for a fast twin-outboard boat.
+	 * Range 0-80. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "80", Units = "cm"))
+	float QuarterWakeLiftCm = 0.f;
+
+	/** How far along each quarter wake its lift reaches, in hull lengths (Quarter Wake Lift Cm). Default 1.5; range 0.2-4. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeLiftCm > 0", ClampMin = "0.2", ClampMax = "4"))
+	float QuarterWakeLiftLength = 1.5f;
+
+	/** Each quarter wake lift's width at half its height, in hull beams (Quarter Wake Lift Cm). Narrower stands the walls up steeper.
+	 * Default 0.4; range 0.1-2. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing && QuarterWakeLiftCm > 0", ClampMin = "0.1", ClampMax = "2"))
+	float QuarterWakeLiftWidth = 0.4f;
+
+	/** How long the stern ridge and the quarter wake lift take to die away once the hull slows below the speeds that make them (Stern Ridge
+	 * Height Cm, Quarter Wake Lift Cm), in seconds from full to none. Their push follows the speed up at once but fades no faster than
+	 * this, so a boat that slows hard lets its mounds settle instead of dropping them in a frame, which would slosh as a wave of its own.
+	 * Below 30 cm/s through the water a hull pushes neither, whatever is left. 0: they follow the speed both ways. Default 2; range 0-10. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (EditCondition = "HullFlow == EFluidNinjaHullFlow::Planing", ClampMin = "0", ClampMax = "10", Units = "s"))
+	float SternWaveFadeSeconds = 2.f;
+
+	/** The whitewater along the hull's sides (powered or planing hulls): the white rim where the spray root and the water peeling off the
+	 * chines run aft along the sides into the quarter wakes, and the bow wave breaking at the stem when the hull pushes hard into the water.
+	 * Higher whitens it; 0 none. Needs FluidNinja Waves interface version 6 and the foam on. Default 1; range 0-5. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (ClampMin = "0", ClampMax = "5"))
+	float HullSideFoam = 1.f;
+
+	/** How broken the whitewater is (all of it: the propeller trail, the transom churn, the quarter wakes and the sides). 0 lays smooth,
+	 * even bands; higher scatters it into the lacy, ragged streaks of real whitewater, flickering from frame to frame. Default 0.6;
+	 * range 0-1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (ClampMin = "0", ClampMax = "1"))
+	float WhitewaterRaggedness = 0.6f;
+
+	/** How many foam patches this body's whitewater is drawn with each frame (a quarter of it while the body is far or unseen). More
+	 * gives finer lace; the foam's overall whiteness does not change with it. A water simulation takes at most 1024 patches a frame from
+	 * all its bodies together. Default 240; range 16-600. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wake", meta = (ClampMin = "16", ClampMax = "600"), AdvancedDisplay)
+	int32 WhitewaterPatches = 240;
+
 	/** A one-shot played where the hull slams into the water (Slap Min Watts), louder the harder the slam. Float inputs a MetaSound can
 	 * read are set on it: "Pitch Shift" (semitones), "Impact" (the slam on the project's splash scale, Splash Reference Watts), "Speed"
 	 * (the water running past the water line, cm/s), "Length" (the water line, cm) and "Mass" (the body, kg). At most one every 0.08 s;
@@ -627,6 +1142,14 @@ public:
 	 * no drip (there is no project default). */
 	UPROPERTY(EditAnywhere, Category = "Sound")
 	TSoftObjectPtr<USoundBase> DripSound;
+
+	/** Propeller model: an engine loop played while the propeller model runs, attached at the propeller. Float inputs a MetaSound reads are
+	 * kept up to date on it: "RPM" (the engine, rev/min), "Load" (0-1.5: how hard it works), "Throttle" (0-1: the lever's position, ahead or
+	 * astern, before the engine's response lag), "Ventilated" (1 while the propeller is ventilated: the flare) and "Speed" (the
+	 * hull's speed through the water, cm/s), each sent only when it changes. Its volume is Sound Volume. None (the default): the project
+	 * default (Project Settings → FluidNinja Buoyancy → Effects → Engine Sound; no sound ships with the plugin), and with that none. */
+	UPROPERTY(EditAnywhere, Category = "Sound")
+	TSoftObjectPtr<USoundBase> EngineSound;
 
 	/** How the hull's sounds fade with distance. None (the default): the project default (Project Settings → FluidNinja Buoyancy →
 	 * Effects → Hull Attenuation; SA_FNB_Hull as the plugin ships). */
@@ -713,6 +1236,20 @@ public:
 	/** FluidNinja Waves' running estimate of how fast the body heaves, rolls and pitches (Hz; 0 before there is one), for the status line. */
 	void SetWaveMotion(const FVector& Hz) { WaveMotionHz = Hz; }
 	const FVector& GetWaveMotion() const { return WaveMotionHz; }
+	/** The whitewater this body adds to FluidNinja Waves' foam this frame (its propeller's wash, its stern's, where its spray lands), as
+	 * its tick this frame filled it; empty when it has not ticked this frame (its tick turned off, or no hull), so a body that stops
+	 * ticking leaves no wash behind. The subsystem hands it to the waves. */
+	const TArray<FFluidNinjaWaterWash>& GetWashes() const;
+	/** This body's stern ridge and quarter wake lift for the waves this frame (Stern Ridge Height Cm, Quarter Wake Lift Cm): steady upward
+	 * impulse pieces (world X, world Y, the
+	 * impulse downward into the water over the frame in kg·cm/s, negative, and the splat's area in cm², negative: steady), as its tick this
+	 * frame filled them; empty when it has not ticked this frame. The subsystem hands them to the waves with the body's own pieces. */
+	const TArray<FVector4f>& GetSternRidge() const;
+	/** Whether the planing physics runs on this body: Hull Flow Planing on the Triangles hull model (FillParams gives Voxels and Spheres
+	 * the displacement flow). The stern's whitewater and the rooster tail follow it. */
+	bool IsPlaningHull() const { return HullFlow == EFluidNinjaHullFlow::Planing && HullModel == EFluidNinjaHullModel::Triangles; }
+	/** Whether the hull stays at its finest level of detail (a planing hull: its lift comes from the bottom's facets). */
+	bool WantsFinestHull() const { return IsPlaningHull(); }
 
 	/** Call after moving the body by teleporting it (setting its location, a reset, a warp): FluidNinja Waves then clear the water where it
 	 * was and where it is now, and start its own field over, so the jump makes no wave. Settle On Start, Restart At and the test bench call
@@ -756,7 +1293,20 @@ protected:
 	/** How far the body is from the viewer and whether it was drawn lately, into EffectReach, once a tick (see Lod Distances). */
 	void UpdateEffectReach(const UPrimitiveComponent& Primitive);
 	void UpdateSpray(float DeltaTime);
+	/** The spray sheets (Spray Sheets) and the whitewater the body adds to the waves' foam (Washes), from the last readout and contacts. */
+	void UpdateSheetsAndWash(UPrimitiveComponent& Primitive, float DeltaTime);
+	/** One spray sheet: made the first time it is wanted, placed at Launch, its user parameters set; Rate 0 stops it (deactivated once, so
+	 * its drops in the air land and the system completes), and a later Rate above 0 starts it afresh. */
+	void DriveSheet(int32 Index, const FVector& Launch, const FVector& Velocity, float Rate, float ConeDeg, float DropletCm, float WaterZ);
 	void UpdateSound(UPrimitiveComponent& Primitive, float DeltaTime);
+	/** The engine loop: made here the first time the propeller model runs (MakeEngineAudio), then kept up to date. */
+	void UpdateEngineSound(UPrimitiveComponent& Primitive, float DeltaTime);
+	/** Makes the engine loop (EngineAudio) from Engine Sound, else the project's, at the propeller on Primitive, and remembers that it
+	 * tried (bEngineAudioTried) whether or not the sound loaded. Begin Play and UpdateEngineSound share it. */
+	void MakeEngineAudio(UPrimitiveComponent& Primitive);
+	/** Loads the spray sheets' system (Spray Sheet System, else the project's) into LoadedSheetSystem, remembers that it tried
+	 * (bSheetSystemTried), and warns once when a system that is set does not load. */
+	void LoadSheetSystem();
 	/** Throws one splash of Strength on the project's scale (times Splash Scale) if it is worth drawing, the body is near enough for it
 	 * (bSecondary: a crown or plunge splash, near bodies only) and the frame's splash budget allows it. True when it was thrown. */
 	bool SpawnSplash(UWorld& World, const FVector& Where, const FRotator& Facing, float Strength, bool bSecondary);
@@ -821,6 +1371,36 @@ protected:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAudioComponent> WashAudio;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> EngineAudio;
+	/** The engine loop's values last sent (RPM, Load, Throttle, Ventilated, Speed): sent again only when they change. */
+	float EngineSent[5] = {-1.f, -1.f, -1.f, -1.f, -1.f};
+	/** MakeEngineAudio has run for the propeller model with this sound (Engine Sound, else the project's): a sound that did not load is
+	 * tried again only once the propeller model is left and taken up again, or the sound changes. */
+	bool bEngineAudioTried = false;
+	FSoftObjectPath EngineAudioSoundTried;
+
+	/** The spray sheets: port chine, starboard chine, rooster tail (made when first wanted), and whether each is running (hysteresis). */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UNiagaraComponent>> Sheets;
+	bool bSheetOn[3] = {false, false, false};
+
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraSystem> LoadedSheetSystem;
+	/** LoadSheetSystem has run for this system (Spray Sheet System, else the project's): a system that did not load is tried again only
+	 * when that changes. */
+	bool bSheetSystemTried = false;
+	FSoftObjectPath SheetSystemTried;
+
+	/** This frame's whitewater for the waves (GetWashes), and the frame (GFrameCounter) UpdateSheetsAndWash filled it on. */
+	TArray<FFluidNinjaWaterWash> Washes;
+	uint64 WashesFrame = 0;
+	/** This frame's stern ridge pieces (GetSternRidge), filled with Washes on WashesFrame. */
+	TArray<FVector4f> SternRidge;
+	/** The stern ridge's and the quarter wake lift's level, 0-1: their speed ramps, faded down at Stern Wave Fade Seconds. */
+	float SternRidgeLevel = 0.f;
+	float QuarterLiftLevel = 0.f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UNiagaraSystem> LoadedSplash;

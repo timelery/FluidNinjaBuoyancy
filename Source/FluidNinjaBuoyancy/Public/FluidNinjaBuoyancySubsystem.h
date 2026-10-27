@@ -3,7 +3,9 @@
 #include "CoreMinimal.h"
 #include "Engine/EngineBaseTypes.h"
 #include "FluidNinjaBuoyancyBench.h"
+#include "FluidNinjaBuoyancyWash.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/SoftObjectPath.h"
 #include "FluidNinjaBuoyancySubsystem.generated.h"
 
 class ASceneCapture2D;
@@ -14,6 +16,7 @@ class UMaterialInterface;
 class UMaterialParameterCollection;
 class UNiagaraComponent;
 class UNiagaraDataChannelAsset;
+class UNiagaraSystem;
 class UPrimitiveComponent;
 class USkeletalMeshComponent;
 class UTextureRenderTarget2D;
@@ -207,6 +210,55 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaSwimmerStats
 	float BurstImpulseNs = 0.f;
 };
 
+/**
+ * One contact of something light with the water (UFluidNinjaBuoyancySubsystem::AddWaterContact): a beak, a foot or a body going in, a dip,
+ * a take-off, a paddle stroke. Its impulse makes waves in two parts split by wavelength, the long waves in the simulation's grid and the
+ * fine ring ripples the grid cannot carry drawn by the surface (the ring layer, Wave Rings); optionally a splash and a little foam.
+ */
+USTRUCT(BlueprintType)
+struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterContact
+{
+	GENERATED_BODY()
+
+	/** Where it touches the water: world cm, on the water surface (its X and Y place the waves and the foam; the splash spawns here). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	FVector Location = FVector::ZeroVector;
+
+	/** The impulse it gives the water, kg·cm/s (Unreal's units; 100 is 1 N·s): positive presses the water down (an entry, a footstep, a
+	 * stroke), negative pulls it up (an exit, a take-off). The momentum the water takes, as it happened: Wave Impulse Scale and Wave Ring
+	 * Strength are applied here. A 3.5 kg bird hitting the water at 13 m/s gives at most about 4500; a dipped head of 0.1 kg at 3 m/s, about
+	 * 30. 0: no waves (the splash and the foam still come). Any finite value. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	float ImpulseDown = 0.f;
+
+	/** The contact's footprint radius, cm: how wide the disturbance is (a beak tip 1-2, a webbed foot 5-8, a body 10-20). It picks the ring
+	 * band (source σ half of it: 2.5, 6 or 14 cm) and the grid's share is spread at least two wave cells wide; narrower contacts make finer,
+	 * sharper ripples. Default 5. Range 0.5-200 (clamped). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact", meta = (ClampMin = "0.5", ClampMax = "200", Units = "cm"))
+	float RadiusCm = 5.f;
+
+	/** The splash: 0 (the default) spawns none; above 0, the scale the splash system is spawned with, on the project's splash scale (Splash
+	 * Strength: 1 is the system at its own size, the strength a slam of Splash Reference Watts makes; UFluidNinjaBuoyancySettings::SplashStrength
+	 * turns a power into one). Splashes share the floating bodies' budget a frame (fnb.Effects.SplashBudgetPerFrame): past it none is
+	 * spawned. Any value from 0; keep it small (0.2-1) for droplets rather than a white burst. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact", meta = (ClampMin = "0"))
+	float SplashStrength = 0.f;
+
+	/** The splash's up (world): the water's normal, or the direction the water is thrown. Default straight up; a zero vector counts as up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	FVector SplashNormal = FVector::UpVector;
+
+	/** The splash system; none (the default): the project's Splash System (Project Settings → FluidNinja Buoyancy → Effects). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact")
+	TObjectPtr<UNiagaraSystem> SplashSystem = nullptr;
+
+	/** Fresh foam per second over the footprint (1.5 × Radius Cm, σ) for 0.25 s, and a fifth of it as aged foam (Add Water Foam): 0 (the
+	 * default) adds none. About 0.02-0.1 leaves a faint trace; 1 and more whiten the patch (the foam saturates at 1). Needs a core at FluidNinja
+	 * Waves interface version 6 with the foam on. At least 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Contact", meta = (ClampMin = "0"))
+	float FoamRate = 0.f;
+};
+
 /** One GPU allocation FluidNinja Buoyancy owns (fnb.Memory, UFluidNinjaBuoyancySubsystem::ReportMemory): a render target or a readback's
  * staging memory, its size (texels; elements by 1 for a buffer), its format and its megabytes. */
 struct FFluidNinjaBuoyancyMemoryItem
@@ -382,14 +434,40 @@ public:
 	bool GetSwimmerStats(const USkeletalMeshComponent* Mesh, FFluidNinjaSwimmerStats& OutStats) const;
 
 	/** An impulse pressing the water down at Location (kg·cm/s, Unreal's units; negative lifts it) over AreaCm2 seen from above, into the
-	 * FluidNinja Waves simulation there at the next frame (scaled by Wave Impulse Scale, as the hulls' impulses are). */
+	 * FluidNinja Waves simulation there at the next frame (scaled by Wave Impulse Scale, as the hulls' impulses are; spread and timed on that
+	 * simulation's own wave cell and tick). */
 	UFUNCTION(BlueprintCallable, Category = "FluidNinja|Buoyancy")
 	void AddWaterImpulse(FVector Location, float ImpulseDown, float AreaCm2);
+
+	/**
+	 * Something light touches the water (FFluidNinjaWaterContact): a bird's beak, feet or body going in or leaving, a dip, a paddle. Its
+	 * impulse makes waves in two parts that together are its whole spectrum, once: the long waves go into the FluidNinja Waves simulation at
+	 * Location as a pressure poke spread over σ_g = max(2 wave cells, its band's σ) (needs Wave Impulse), and the fine rings the grid cannot
+	 * carry are drawn by the surface as the exact linear response (the ring layer: Wave Rings, fnb.Waves.Rings). Both are scaled by Wave
+	 * Impulse Scale, the rings also by Wave Ring Strength. Splash Strength above 0 spawns the splash system there (pooled), turned to Splash
+	 * Normal, within the floating bodies' splash budget a frame (fnb.Effects.SplashBudgetPerFrame); Foam Rate above 0 lays foam over the
+	 * footprint for 0.25 s (Add Water Foam). Outside every running wave simulation the waves are dropped; the splash and the foam still come
+	 * (the foam needs a simulation to land in). Call it once per contact event (an entry, an exit), or at most every few frames for a
+	 * lasting one: each call is a new ring.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "FluidNinja|Water")
+	void AddWaterContact(const FFluidNinjaWaterContact& Contact);
 
 	/** A Gaussian pressure head HeightCm high (negative: suction) and SigmaCm wide pressing on the water at WorldXY for one of the
 	 * simulation's ticks, at the next frame: an impulse into the waves (a wave maker presses one every tick). */
 	UFUNCTION(BlueprintCallable, Category = "FluidNinja|Buoyancy")
 	void AddWavePoke(FVector2D WorldXY, float HeightCm, float SigmaCm);
+
+	/**
+	 * Whitewater on the water at WorldXY for Seconds: FluidNinja Waves' foam gains Fresh Rate of fresh white foam and Aged Rate of aged foam
+	 * (fine bubbles, the pale trail) per second at the centre of a Gaussian RadiusCm wide (σ). For anything that churns the water without a
+	 * hull: an explosion, a waterfall's foot, a jet ski's nozzle, a whale's blow. The foam then drifts with the current and fades at the
+	 * project's Foam Decay and Foam Aged Decay. Rates: about 1-5 for a churned patch going white in under a second; the foam saturates at
+	 * 1. Seconds 0 lasts one frame. Needs a core at FluidNinja Waves interface version 6 with the foam on; it does nothing otherwise. At most
+	 * 256 at once (the oldest are dropped).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "FluidNinja|Buoyancy")
+	void AddWaterFoam(FVector2D WorldXY, float RadiusCm, float FreshRate, float AgedRate, float Seconds = 0.f);
 
 	/**
 	 * The water's current around Location: the mean of FluidNinja's velocity (world, cm/s; Z is 0) over a ring around it, from Inner Radius
@@ -531,6 +609,8 @@ protected:
 		double LastGatherTime = -1.0;
 		/** Its wave impulse pieces last frame, so this frame's are collected with one allocation. */
 		int32 LastImpulsePieces = 0;
+		/** Its pending wave impulses left the physics step scaled already (a planing hull: FFluidNinjaBuoyancyBodyOutput::bImpulsesScaled). */
+		bool bWaveImpulsesScaled = false;
 		// FluidNinja's own tracking: FluidNinja tracks the body; this plugin handed it over (and what to give back).
 		bool bNinjaTracked = false;
 		bool bHandedOver = false;
@@ -824,6 +904,13 @@ protected:
 	TObjectPtr<UFluidNinjaBuoyancyWaves> Waves;
 	/** Every popped physics step's wave impulses since the last frame, per body id (world x, y, I_down, area), handed to the waves in Tick. */
 	TMap<int32, TArray<FVector4f>> PendingWaveImpulses;
+	/** AddWaterFoam's patches and the world time each lasts until. */
+	TArray<TPair<FFluidNinjaWaterWash, double>> FoamPatches;
+	/** AddWaterContact's default splash system: the project's Splash System, loaded on the first contact that asks for one, and the path it
+	 * was loaded from (a changed setting loads again). */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraSystem> ContactSplashSystem;
+	FSoftObjectPath ContactSplashPath;
 	bool bWaveImpulseCapLogged = false;
 	/** The Surface Mirror was drawn this frame (the waves raster the hulls against it). */
 	bool bCapturedThisFrame = false;

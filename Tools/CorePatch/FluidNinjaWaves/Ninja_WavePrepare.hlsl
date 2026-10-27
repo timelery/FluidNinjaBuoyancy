@@ -10,6 +10,18 @@
 // (foam is a diffuse quantity: the bilinear read never overshoots and costs one fetch), and handed to Wave Step through the foam
 // target (Emitter.WaveFoam, the plugin's) as this tick's scratch; Wave Aux overwrites it with the final F. Nothing of it touches
 // (eta, v).
+// Interface version 6: the aged foam F2 (WaveGrid attribute FoamAged) is carried exactly as F (now F1, the fresh foam): the same
+// back-trace, the same exact load or bilinear read. The scratch is (F1 m, hi(F2 m), lo(F2 m) x FoamAgedLoScale, 0): F2 m split into its
+// nearest half float hi and the remainder lo = F2 m - hi, stored scaled by FoamAgedLoScale (2048, _foamaged.hlsl), which Wave Step undoes
+// as it adds it back (.y + .z / 2048). This deliberately departs from a plain (F1 m, F2 m, 0, 0): the plugin's foam target is a 16-bit
+// float target, and F2 decays slowly (Wave.FoamAgedDecay 0.02 /s is 3.3e-4 of it per 60 Hz tick, below half a half-float ulp in the lower
+// part of every binade), so a single 16-bit channel rounds F2 back to the same value every tick and the aged foam never fades (0.6 stays
+// 0.6 for 50 s instead of falling to 0.22). hi is a half float itself, so the target stores it exactly whatever its rounding; lo is at most
+// 2^-11 of F2 and keeps the rest to about 2^-22. Unscaled, lo is often a half-float denormal, which a GPU that flushes them stores or
+// loads as 0, and F2 stalls again (0.2 stays 0.183 over 50 s); times 2048 it is a normal half float (_foamaged.hlsl says why and how far).
+// F1 stays one 16-bit channel, exactly as interface 5 hands it over. The scratch is the core's own: Wave Aux overwrites the target with
+// (F1, F2, v, 0) every tick. On an RG target lo is dropped (F2 at 16-bit precision), on an R target F2's scratch reads 0; a missing .z
+// reads 0, never 1 as a missing .w would.
 int IX;
 int IY;
 WaveOp.ExecToIndex(IX, IY);
@@ -44,10 +56,12 @@ else
 float Eta = State.x;
 float V = State.y;
 
-// ---- foam: the previous F at the same back-traced position (outside the grid 0, as eta), into the foam target for Wave Step
+// ---- foam: the previous F1 and F2 at the same back-traced position (outside the grid 0, as eta), into the foam target for Wave Step
+//@include _foamaged.hlsl
 if (FoamEnabled)
 {
 	float FoamAdv = 0.0;
+	float FoamAgedAdv = 0.0;
 	float2 FoamPos = float2(IX, IY) + Scroll - Drift;
 	if (all(FoamPos >= -0.5) && all(FoamPos <= Cells - 0.5))
 	{
@@ -57,14 +71,19 @@ if (FoamEnabled)
 			if (FoamQ.x >= 0 && FoamQ.y >= 0 && FoamQ.x < NX && FoamQ.y < NY)
 			{
 				WaveGrid.GetPreviousFloatValue<Attribute=Foam>(FoamQ.x, FoamQ.y, FoamAdv);
+				WaveGrid.GetPreviousFloatValue<Attribute=FoamAged>(FoamQ.x, FoamQ.y, FoamAgedAdv);
 			}
 		}
 		else
 		{
 			WaveGrid.SamplePreviousGridFloatValue<Attribute=Foam>((FoamPos + 0.5) / Cells, FoamAdv);
+			WaveGrid.SamplePreviousGridFloatValue<Attribute=FoamAged>((FoamPos + 0.5) / Cells, FoamAgedAdv);
 		}
 	}
-	WaveFoam.SetRenderTargetValue(true, IX, IY, float4(FoamAdv * Wet, 0.0, 0.0, 0.0));
+	float FoamAgedOut = FoamAgedAdv * Wet;
+	float FoamAgedHi = f16tof32(f32tof16(FoamAgedOut));
+	// lo stored times FoamAgedLoScale, so it is a normal half float, not a denormal a GPU may flush (_foamaged.hlsl); Wave Step undoes it.
+	WaveFoam.SetRenderTargetValue(true, IX, IY, float4(FoamAdv * Wet, FoamAgedHi, (FoamAgedOut - FoamAgedHi) * FoamAgedLoScale, 0.0));
 }
 
 //@include _source.hlsl

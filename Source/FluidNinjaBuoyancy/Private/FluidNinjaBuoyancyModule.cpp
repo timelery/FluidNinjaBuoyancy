@@ -326,6 +326,8 @@ UFluidNinjaBuoyancySettings::UFluidNinjaBuoyancySettings()
 	// The plugin's own spray and hull attenuation. No hull sounds ship with the plugin: set Slap, Wash and Creak Sound to your own.
 	SplashSystem = FSoftObjectPath(TEXT("/FluidNinjaBuoyancy/Effects/NS_FNB_HullSplash.NS_FNB_HullSplash"));
 	HullAttenuation = FSoftObjectPath(TEXT("/FluidNinjaBuoyancy/Audio/SA_FNB_Hull.SA_FNB_Hull"));
+	// The spray sheets (Spray Sheets on a body): the plugin's own sheet system.
+	SpraySheetSystem = FSoftObjectPath(TEXT("/FluidNinjaBuoyancy/Effects/NS_FNB_HullSpray.NS_FNB_HullSpray"));
 	// FluidNinja Waves on the demo level's simulations: its pool is a closed basin 4 m deep, its river lane 3 m deep.
 	FFluidNinjaWaveSimSettings Pool;
 	Pool.NinjaLive = TEXT("Pool_FluidNinja");

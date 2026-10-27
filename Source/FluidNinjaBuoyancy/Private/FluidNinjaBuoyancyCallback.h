@@ -32,6 +32,13 @@ struct FFluidNinjaBuoyancyBodyInput
 	 * within the dynamic impulse stable steps actually gave the body: its explicit drag and slam plus their implicit changes and the
 	 * added mass's (their implicit heave spring is hydrostatic and leaves the impulses alone). */
 	bool bWaveImpulses = false;
+	/** FluidNinja Waves, a planing hull (FParams::bSplitSteadyImpulses): its impulses leave the step already scaled, the steady pieces (their
+	 * area negative) by SteadyImpulseScale and the rest by TransientImpulseScale (Wave Impulse Scale), after the budget; the waves then add
+	 * no scale of their own (FFluidNinjaBuoyancyBodyOutput::bImpulsesScaled). Scaled here, before the subsystem merges pieces past its cap,
+	 * so a merge never mixes the two kinds. */
+	bool bPreScaleImpulses = false;
+	float SteadyImpulseScale = 1.f;
+	float TransientImpulseScale = 1.f;
 	/** FluidNinja Waves: κ, how much of the waves of everything but itself (the patch's B - B_self) the body feels (0: none). */
 	float WaveFeel = 0.f;
 	/** FluidNinja Waves: the radiation damping of the body's own waves, applied in every step against the body's motion (the self field
@@ -68,6 +75,8 @@ struct FFluidNinjaBuoyancyBodyOutput
 	float Mass = 0.f;
 	FVector CenterOfMass = FVector::ZeroVector;
 	FluidNinjaBuoyancy::FStepResult Result;
+	/** Result.RippleImpulses are scaled already (FFluidNinjaBuoyancyBodyInput::bPreScaleImpulses): the waves take them as they are. */
+	bool bImpulsesScaled = false;
 	/** The water's vertical acceleration the heave added mass was pushed along with this step, a_w (cm/s², after the bound; 0 without
 	 * added mass, without a tracked wave, without stable steps, or with fnb.Physics.AddedMassWaterAccel 0), and whether the bound held it
 	 * (the callback's TrackWaterAcceleration). For the test bench. */

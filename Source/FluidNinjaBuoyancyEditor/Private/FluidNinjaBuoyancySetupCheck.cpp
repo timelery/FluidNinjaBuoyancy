@@ -41,6 +41,9 @@ namespace
 	 * and WaveRequiredCoreBuild (keep them together), read here from the asset's exposed parameters as the waves read them from the core. */
 	constexpr int32 RequiredInterfaceVersion = 2;
 	constexpr int32 RequiredCoreBuild = 20261017;
+	/** The interface of the full foam (FluidNinjaBuoyancyWaves.cpp's WaveFoamV2InterfaceVersion): aged foam, the wash texture (propeller
+	 * trails, spray landing, AddWaterFoam), foam diffusion and the breaking-slope foam. An older core still runs, with the simpler foam. */
+	constexpr int32 FullFoamInterfaceVersion = 6;
 	const FName WaveSimEnabledName(TEXT("User.WaveSimEnabled"));
 	const FName WaveAuxTargetName(TEXT("User.WaveAuxTarget"));
 	const FName WaveInterfaceVersionName(TEXT("User.Wave.InterfaceVersion"));
@@ -379,6 +382,10 @@ namespace
 		else
 		{
 			Report.Line(EMessageSeverity::Info, FString::Printf(TEXT("is the modified NinjaLiveCore: FluidNinja Waves core build %d, interface %d (this plugin needs interface %d, build %d or later)."), CoreBuild, InterfaceVersion, RequiredInterfaceVersion, RequiredCoreBuild), nullptr, System);
+			if (InterfaceVersion < FullFoamInterfaceVersion)
+			{
+				Report.Line(EMessageSeverity::Warning, FString::Printf(TEXT("speaks interface %d, before the full foam (interface %d): no aged foam, no propeller trails or spray-landing foam, no AddWaterFoam. Waves and bodies are unaffected. Re-apply FluidNinja Waves (Tools/CorePatch/apply_fluidninja_waves.py) or install the current zip's core."), InterfaceVersion, FullFoamInterfaceVersion), nullptr, System);
+			}
 		}
 		if (bRelative)
 		{

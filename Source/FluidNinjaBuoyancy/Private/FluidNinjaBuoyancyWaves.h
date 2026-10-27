@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "UObject/ObjectKey.h"
+#include "FluidNinjaBuoyancyWash.h"
 #include "FluidNinjaBuoyancyWaves.generated.h"
 
 class AActor;
@@ -18,6 +19,9 @@ class UFluidNinjaWaveSimComponent;
 struct FFluidNinjaWaveSimSettings;
 namespace FluidNinjaBuoyancy { struct FHull; }
 namespace FluidNinjaBuoyancyWaveSource { class FState; struct FSelf; struct FDeepHead; }
+namespace FluidNinjaBuoyancyWindSea { class FState; }
+namespace FluidNinjaBuoyancyRings { class FState; }
+class UTexture2D;
 
 /** Where the water a body is measured against comes from, where the Surface Mirror shows none under it (a change resets the body). */
 enum class EFluidNinjaWaveWater : uint8
@@ -105,6 +109,9 @@ struct FFluidNinjaWaveBodyImpulses
 {
 	int32 Id = 0;
 	TArray<FVector4f> Pieces;
+	/** The pieces left the physics step scaled already (a planing hull: its steady pieces, their area negative, at Wave Planing Pressure
+	 * Scale, the rest at Wave Impulse Scale), so the waves add no scale of their own. */
+	bool bScaled = false;
 };
 
 /** Everything the waves take from FluidNinja Buoyancy each frame (UFluidNinjaBuoyancySubsystem fills it). */
@@ -119,6 +126,11 @@ struct FFluidNinjaWaveWorldInput
 	/** Registered swimmers' spheres, or one player-shaped body for an opted-in humanoid pawn (Pawn valid). */
 	TArray<FFluidNinjaWaveSwimmerInput> Puppets;
 	TArray<FFluidNinjaWaveBodyImpulses> Impulses;
+	/** The whitewater the bodies (their propellers, sterns and spray) and AddWaterFoam add to the foam this frame (interface version 6). */
+	TArray<FFluidNinjaWaterWash> Washes;
+	/** AddWaterFoam's patches on their last frame (a Seconds 0 patch's only one), apart from Washes: nothing sends them again, so they are
+	 * kept until a core tick reads them, as the impulses are (FSimState::PendingFoamPatches). */
+	TArray<FFluidNinjaWaterWash> FinalFoamPatches;
 	FVector Camera = FVector::ZeroVector;
 	bool bHasCamera = false;
 	/** The drawn water's own actors: the depth traces under the bodies look through them. */
@@ -249,7 +261,8 @@ public:
 	/** The cell (cm) the impulse pieces are merged in when there are too many: the finest wave cell running (1 cm without one). */
 	double GetMergeCellCm() const;
 	/** The Surface Mirror shows FluidNinja's own surface W: the captured surfaces' dynamic materials get WaveHeightScale 0 before its
-	 * capture (bHidden) and their own value back right after it. */
+	 * capture (bHidden) and their own value back right after it. Materials exposing LFPhysicsWaterCapture also get 1 for this capture
+	 * alone, then their previous value back, so visual hull cutouts do not remove the water the physics samples. */
 	void SetMirrorWavesHidden(bool bHidden, const TArray<TWeakObjectPtr<UPrimitiveComponent>>& Shown);
 	/** The body's simulation's B and its own field's tile for the gather; false when it feels no waves (no own field yet, waves off). */
 	bool GetGatherSlot(int32 BodyId, FFluidNinjaWaveGatherSlot& Out) const;
@@ -257,12 +270,28 @@ public:
 	UTextureRenderTarget2D* GetSelfAtlas() const { return SelfAtlas; }
 	/** κ and the radiation damping for the body's physics steps; false (and zeros) when it feels no waves. */
 	bool GetBodyFeel(int32 BodyId, FFluidNinjaWaveBodyFeel& Out) const;
+	/** The water's depth under the body as its waves take it (cm: its simulation's depth, or the ground traced under it with Wave Depth From
+	 * Ground), for a planing hull's wave resistance; 0 (deep water) when no running simulation has it. */
+	float GetBodyDepthCm(int32 BodyId) const;
 	FString GetStatusLine() const { return StatusLine; }
 	/** The GPU memory the waves hold, one item per target the plugin owns: each simulation's source texture and Wave Aux target, the
 	 * self-field atlas, the self-field pools (per size: the slots the render thread keeps, mirrored here), and the bench's readback rings
 	 * while probes or stats are wanted. Appended to OutItems; the per-frame transients (a simulation's static head and impulse textures,
 	 * a batch's WaveOp slices) live in the render graph's pool and are not listed. */
 	void ReportMemory(TArray<FFluidNinjaWaveMemoryItem>& OutItems) const;
+
+	/** The ring layer (FluidNinjaBuoyancyRings.h): a ring of ImpulseDown (kg·cm/s, + presses the water down; the impulse as it happened,
+	 * unscaled) from a contact RadiusCm wide at WorldXY, drawn by the surfaces of the running simulation holding it (the smallest, as the
+	 * pokes find theirs), whose ring state is made on its first ring. Dropped where no running simulation holds it, and while the ring layer
+	 * is off (Wave Rings, fnb.Waves.Rings). */
+	void AddRing(const FVector2D& WorldXY, float ImpulseDown, float RadiusCm);
+	/** The wave cell (cm: the grid the waves run on, the pressure buffer's cell times the scale-down) and the core's fixed ticks a second of
+	 * the running simulation holding WorldXY; where none holds it, GetCellCm and GetStepsPerSecond (the bench's window). */
+	double GetCellCmAt(const FVector2D& WorldXY) const;
+	double GetStepsPerSecondAt(const FVector2D& WorldXY) const;
+	/** fnb.Waves.RingsDump: logs the ring response table of the first running simulation that has one (FluidNinjaBuoyancyRings::FState::LogLut),
+	 * or that none has. */
+	void DumpRings() const;
 
 	/* Test bench (the facade the ripple tests were written against; the window is the wave simulation around the camera). */
 	/** A Gaussian pressure head HeightCm high and SigmaCm wide pressing on the water for one of the core's ticks, at the next frame: an
@@ -324,6 +353,24 @@ private:
 		TWeakObjectPtr<UTextureRenderTarget2D> Foam;
 		/** The foam is accumulating this frame (interface 4 core, the setting and fnb.Waves.Foam on), for the status line. */
 		bool bFoam = false;
+		/** The wash texture (User.WaveWashTexture, interface version 6: fresh and aged foam rates and the steady impulse head per cell, which
+		 * the core's foam takes in), and this frame's whitewater for it (world XY; only while the foam is on, as the core reads it only
+		 * then). None on an older core. LastWriteWashes counts the patches its last write washed in, the kept final ones included. */
+		TWeakObjectPtr<UTextureRenderTarget2D> Wash;
+		TArray<FFluidNinjaWaterWash> FrameWashes;
+		int32 LastWriteWashes = 0;
+		/** The wind sea (interface version 7, FluidNinjaBuoyancyWindSea.h): its state while the simulation asks for one, and the table it
+		 * wrote this frame (User.WaveWindSeaTexture, and the surfaces' WaveWindSeaTable); null while it has none. */
+		TSharedPtr<FluidNinjaBuoyancyWindSea::FState> WindSea;
+		TWeakObjectPtr<UTexture2D> WindSeaTable;
+		/** The ring layer (FluidNinjaBuoyancyRings.h): its state from the simulation's first ring until it stops (kept while it has no rings,
+		 * so its response table is not worked out again for every splash), and the table and LUT the surfaces get (WaveRingTable, WaveRingLUT)
+		 * once the state has made them; an empty table holds N = 0 and draws nothing, so they stay bound. When the simulation stops the table
+		 * is written empty (its surfaces, no longer bound, keep it and draw nothing) and the surfaces go back to their defaults when it runs
+		 * again. */
+		TSharedPtr<FluidNinjaBuoyancyRings::FState> Rings;
+		TWeakObjectPtr<UTexture2D> RingTable;
+		TWeakObjectPtr<UTexture2D> RingLUT;
 		FString Name;
 		/** The core checked for User.WaveSimEnabled, User.WaveAuxTarget and its interface version (by pointer, so a new core is checked
 		 * again), and what was found. */
@@ -382,6 +429,18 @@ private:
 		bool bEdgeOpen = true;
 		/** WaveNormalScale for its surfaces' dynamic materials. */
 		float NormalScale = 0.f;
+		/** How much its current carries its waves and foam (User.Wave.CurrentCoupling): its Wave Sims entry's, else the project's. */
+		float CurrentCoupling = 1.f;
+		/** How fast its waves lose their energy (User.Wave.Damping, 1/s), its own fields' too: its Wave Sims entry's, else the project's. */
+		float Damping = 0.02f;
+		/** Its foam: its Wave Sims entry's overrides, else the project's (User.Wave.FoamDecay, FoamAgedDecay, FoamWake, FoamTransfer,
+		 * FoamDiffusion, FoamAgedDiffusion). */
+		float FoamDecay = 0.7f;
+		float FoamAgedDecay = 0.02f;
+		float FoamWake = 1.f;
+		float FoamTransfer = 0.5f;
+		float FoamDiffusion = 30.f;
+		float FoamAgedDiffusion = 200.f;
 		/** The pressure buffer's object says RGBA16F (B = η + P in z, A = P in w), for the status line. The render thread reads B only from
 		 * an RGBA16F texture whatever this says (a stock RG16F one has no B, and its A reads 1). */
 		bool bPressureReady = false;
@@ -411,10 +470,15 @@ private:
 		TArray<FVector4> PendingPokes;       // world x, y, head, sigma
 		TArray<FBox2D> PendingErase;         // world XY
 		bool bPendingEraseAll = false;
+		/** AddWaterFoam's patches on their last frame (FFluidNinjaWaveWorldInput::FinalFoamPatches), kept the same way: the wash is written
+		 * whole every write, so one no tick read would be gone. The bodies' washes and a lasting patch's earlier frames come again every
+		 * frame and are not kept (FrameWashes). */
+		TArray<FFluidNinjaWaterWash> PendingFoamPatches;   // world XY
 		TArray<FVector4f> LastImpulses;
 		TArray<FVector4> LastPokes;
 		TArray<FBox2D> LastErase;
 		bool bLastEraseAll = false;
+		TArray<FFluidNinjaWaterWash> LastFoamPatches;
 		bool bAwaitingConfirm = false;
 		uint32 Serial = 0;
 		double FixedAge = 0.0;
@@ -625,6 +689,9 @@ private:
 	/** The bench's window: the smallest running simulation holding the focus while there is one; else the one around the camera, else
 	 * the smallest running. */
 	FObjectKey PickBenchSim() const;
+	/** The smallest running simulation whose square holds WorldXY (the one the pokes, impulses and foam patches go into), or null. */
+	FSimState* FindActiveSimAt(const FVector2D& WorldXY);
+	const FSimState* FindActiveSimAt(const FVector2D& WorldXY) const;
 
 	TWeakObjectPtr<UFluidNinjaBuoyancySubsystem> Owner;
 
@@ -677,9 +744,13 @@ private:
 	TMap<UPTRINT, uint32> CachedFirstTriangle;
 	TSharedPtr<const TArray<FVector4f>, ESPMode::ThreadSafe> CachedTriangles;
 	uint32 TriangleSerial = 0;
+	/** The hull raster's lines per cell last noted in the log (Wave Raster Lines); 0 before the first frame. */
+	int32 LoggedRasterLines = 0;
 
 	/** The dynamic materials whose WaveHeightScale the Surface Mirror's capture set to 0, with the value each gets back. */
 	TArray<TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>> HiddenMaterials;
+	/** Optional visual-cutout bypass, independent of whether waves are running. Only the physics mirror sets this flag. */
+	TArray<TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>> PhysicsCaptureMaterials;
 	/** Captured surfaces of a wave simulation that had no dynamic material with WaveHeightScale this frame: the mirror shows their waves,
 	 * so the floaters there feel their own waves again (an error, logged once per surface, and in the status line). */
 	int32 UnhiddenSurfaces = 0;
@@ -701,6 +772,9 @@ private:
 
 	/** When the surfaces' WaveNormalScale is next set (FluidNinja makes new dynamic materials during play). */
 	double NextNormalScale = 0.0;
+	/** A simulation's ring table or LUT object changed this frame (its first ring, a table grown, a LUT built again, the simulation
+	 * stopped): the surfaces are bound again this frame, not at the next once-a-second pass, so a first ring is drawn at once. */
+	bool bRingTexturesChanged = false;
 	/** When the status line is next built while nothing shows it every frame. */
 	double NextStatusBuild = 0.0;
 	bool bWarnedTick = false;

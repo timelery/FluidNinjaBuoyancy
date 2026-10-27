@@ -6,6 +6,9 @@
 // cells, bilinear between them by world position as the source read always was; so RT_PressureDivergence keeps the pressure buffer's
 // resolution and FluidNinja's surface material and the plugin's gather read it as before. At S = 1 the exact load and the Catmull-Rom
 // read are what interface 2 did.
+// Interface version 7: the wind sea (_windsea.hlsl). B gains W, the long band of the plugin's wind-sea table (User.WaveWindSeaTexture)
+// summed at the texel's world centre and faded out across an open window's sponge band: B = eta + P + W. A keeps P; nothing else here
+// changes, and with no table bound W is exactly 0 (interface 6's export).
 int IX;
 int IY;
 RT_Pressure.ExecToIndex(IX, IY);
@@ -66,5 +69,6 @@ if (NX == max(RW / Scale, 1) && NY == max(RH / Scale, 1))
 float2 U = (float2(IX, IY) + 0.5) / float2(RW, RH);
 float3 SrcSim = mul(float4(U, 0.5, 1.0), UnitToWorld).xyz;
 //@include _source.hlsl
-RT_Pressure.SetRenderTargetValue(true, IX, IY, float4(PD.x, PD.y, Eta + SrcP, SrcP));
+//@include _windsea.hlsl
+RT_Pressure.SetRenderTargetValue(true, IX, IY, float4(PD.x, PD.y, Eta + SrcP + WindSea, SrcP));
 Done = Eta;

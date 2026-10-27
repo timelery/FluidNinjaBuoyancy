@@ -27,6 +27,7 @@
 #include "FluidNinjaBuoyancyCore.h"
 #include "FluidNinjaBuoyancyGather.h"
 #include "FluidNinjaBuoyancyLog.h"
+#include "FluidNinjaBuoyancyRings.h"
 #include "FluidNinjaBuoyancySettings.h"
 #include "FluidNinjaBuoyancyStats.h"
 #include "FluidNinjaBuoyancySwimmerProvider.h"
@@ -1745,6 +1746,35 @@ FString UFluidNinjaBuoyancySubsystem::DescribeStirApproach() const
 	return Text;
 }
 
+namespace
+{
+	// The material a drawn surface samples the simulation with: a mesh's first material, or, for a Niagara sheet (FluidNinja's GPU mesh
+	// spawner, which its NinjaLive hands its output material through a user parameter), the first material it renders with that has the
+	// velocity buffer. So a Niagara sheet gives its simulation's buffers by itself, with no flat mesh under it.
+	UMaterialInterface* SurfaceMaterial(const UPrimitiveComponent* Primitive, const FName& VelocityParameter)
+	{
+		if (!Primitive)
+		{
+			return nullptr;
+		}
+		if (!Primitive->IsA<UNiagaraComponent>())
+		{
+			return Primitive->GetMaterial(0);
+		}
+		TArray<UMaterialInterface*> Used;
+		Primitive->GetUsedMaterials(Used);
+		for (UMaterialInterface* Material : Used)
+		{
+			UTexture* Texture = nullptr;
+			if (Material && Material->GetTextureParameterValue(FHashedMaterialParameterInfo(VelocityParameter), Texture) && Texture)
+			{
+				return Material;
+			}
+		}
+		return nullptr;
+	}
+}
+
 void UFluidNinjaBuoyancySubsystem::RefreshSources()
 {
 	// The drawn water surface: the spline pieces and flat meshes of the tagged actors, and a Niagara water sheet. A
@@ -1808,7 +1838,7 @@ void UFluidNinjaBuoyancySubsystem::RefreshSources()
 	for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : SurfacePrimitives)
 	{
 		UPrimitiveComponent* Primitive = Weak.Get();
-		UMaterialInterface* Material = Primitive && !Primitive->IsA<UNiagaraComponent>() ? Primitive->GetMaterial(0) : nullptr;
+		UMaterialInterface* Material = SurfaceMaterial(Primitive, Parameter);
 		UTexture* Texture = nullptr;
 		UTextureRenderTarget2D* Target = Material && Material->GetTextureParameterValue(FHashedMaterialParameterInfo(Parameter), Texture)
 			? Cast<UTextureRenderTarget2D>(Texture) : nullptr;
@@ -1841,7 +1871,8 @@ void UFluidNinjaBuoyancySubsystem::RefreshSources()
 	}
 	FlowSources = MoveTemp(Found);
 	UpdateFlowSources();
-	// Which simulation each surface shows: its material's velocity buffer, else (a Niagara sheet) the one whose surface lies under it.
+	// Which simulation each surface shows: its material's velocity buffer (a Niagara sheet's: the material its NinjaLive hands it), else
+	// the one whose surface lies under it.
 	SurfaceSources.Reset(SurfacePrimitives.Num());
 	for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : SurfacePrimitives)
 	{
@@ -1850,7 +1881,7 @@ void UFluidNinjaBuoyancySubsystem::RefreshSources()
 		{
 			continue;
 		}
-		UMaterialInterface* Material = !Primitive->IsA<UNiagaraComponent>() ? Primitive->GetMaterial(0) : nullptr;
+		UMaterialInterface* Material = SurfaceMaterial(Primitive, Parameter);
 		UTexture* Texture = nullptr;
 		const UTextureRenderTarget2D* Target = Material && Material->GetTextureParameterValue(FHashedMaterialParameterInfo(Parameter), Texture)
 			? Cast<UTextureRenderTarget2D>(Texture) : nullptr;
@@ -2530,7 +2561,18 @@ void UFluidNinjaBuoyancySubsystem::FinishPatch(FSlot& Slot, const TSharedRef<Flu
 		if (const UPrimitiveComponent* Primitive = Component->GetSimulatedPrimitive())
 		{
 			const FVector2D Centre(Primitive->Bounds.Origin);
-			const double Inner = Primitive->Bounds.SphereRadius * 1.05 + 50.0;
+			// A body that writes wakes reaches past its hull by its wake brushes (up to twice Wake Brush Size at speed): the ring starts
+			// outside them.
+			const double WakeReach = Component->bWake ? 2.0 * Component->WakeBrushSizeCm : 0.0;
+			const double Inner = Primitive->Bounds.SphereRadius * 1.05 + 50.0 + WakeReach;
+			// A moving body leaves its wake and its propeller's jet behind it, and read back from there they come back as a current of
+			// metres a second (a boat at 15 m/s read up to 4.9 m/s sideways in still water, which turned its own wake and pushed it about).
+			// While it moves, the current is read from the water ahead of it and beside it, the water it is about to meet.
+			const FVector Moving = Primitive->GetComponentVelocity();
+			const FVector2D Motion(Moving.X, Moving.Y);
+			const bool bMoving = Motion.Size() > 150.0;
+			const FVector2D Heading = bMoving ? Motion.GetSafeNormal() : FVector2D::ZeroVector;
+			const double BehindLimit = -0.25 * Inner;
 			double S[3][3] = {};
 			double RX[3] = {};
 			double RY[3] = {};
@@ -2546,7 +2588,7 @@ void UFluidNinjaBuoyancySubsystem::FinishPatch(FSlot& Slot, const TSharedRef<Flu
 						continue;
 					}
 					const FVector2D Offset = Patch->Origin + FVector2D(I * Texel, J * Texel) - Centre;
-					if (Offset.Size() < Inner)
+					if (Offset.Size() < Inner || (bMoving && FVector2D::DotProduct(Offset, Heading) < BehindLimit))
 					{
 						continue;
 					}
@@ -3333,7 +3375,9 @@ namespace
 	 * same part of it (its stern, say) and the ring would lean towards the rest. Pieces in the same square, pressing the same way, become
 	 * one with their summed impulse and area at their impulse-weighted centre. The square starts at one ripple cell (the solver's splat
 	 * blurs pieces closer than that together anyway) and doubles until the pieces fit. Every piece's impulse stays in the frame, and so
-	 * does where it lands to within a square: with one sign per square, each merged centre lies among its own pieces.
+	 * does where it lands to within a square: with one sign per square, each merged centre lies among its own pieces. A planing hull's
+	 * steady pieces (their area negative) merge only among themselves, so the merged ones keep their negative area and the waves still
+	 * take their head apart.
 	 */
 	void FluidNinjaBuoyancyMergeRippleImpulses(TArray<FVector4f>& Pieces, double CellCm, int32 Cap)
 	{
@@ -3364,11 +3408,14 @@ namespace
 			return;
 		}
 		// Relative to the first piece, in double (world coordinates are large); the squares are centred on it, so once a square is wider
-		// than the spread of the pieces every piece pressing one way falls in the same one (and the loop ends with at most two).
+		// than the spread of the pieces every piece of one kind falls in the same one, and the loop ends with at most one piece a kind: two
+		// (the two signs), or four with a planing hull's steady pieces among them. A merged piece keeps its kind (its pieces' impulses share a
+		// sign, and their areas are all negative or none is), so the kinds never grow and the loop always ends.
+		const bool bSteady = Pieces.ContainsByPredicate([](const FVector4f& Piece) { return Piece.W < 0.f; });
 		const double BaseX = Pieces[0].X;
 		const double BaseY = Pieces[0].Y;
 		TMap<FIntVector, FRippleImpulseBin> Bins;
-		for (double BinCm = FMath::Max(CellCm, 1.0); Pieces.Num() > FMath::Max(Cap, 2); BinCm *= 2.0)
+		for (double BinCm = FMath::Max(CellCm, 1.0); Pieces.Num() > FMath::Max(Cap, bSteady ? 4 : 2); BinCm *= 2.0)
 		{
 			Bins.Reset();
 			for (const FVector4f& Piece : Pieces)
@@ -3376,7 +3423,7 @@ namespace
 				const double PieceX = static_cast<double>(Piece.X) - BaseX;
 				const double PieceY = static_cast<double>(Piece.Y) - BaseY;
 				const FIntVector Key(static_cast<int32>(FMath::Clamp(FMath::RoundToDouble(PieceX / BinCm), -1.0e9, 1.0e9)),
-					static_cast<int32>(FMath::Clamp(FMath::RoundToDouble(PieceY / BinCm), -1.0e9, 1.0e9)), Piece.Z > 0.f ? 1 : -1);
+					static_cast<int32>(FMath::Clamp(FMath::RoundToDouble(PieceY / BinCm), -1.0e9, 1.0e9)), (Piece.Z > 0.f ? 1 : -1) * (Piece.W < 0.f ? 2 : 1));
 				FRippleImpulseBin& Bin = Bins.FindOrAdd(Key);
 				const double PieceWeight = FMath::Abs(static_cast<double>(Piece.Z));
 				Bin.Impulse += Piece.Z;
@@ -3396,20 +3443,32 @@ namespace
 		}
 		if (Pieces.Num() > Cap)
 		{
-			// A cap of one with pieces pressing both ways: the net impulse, at the centre of them all.
-			FRippleImpulseBin Net;
+			// A cap below the kinds left: the net impulse, at the centre of them all, as one piece. With a planing hull's steady pieces and
+			// room for two, the steady ones and the rest make a net each, the steady one keeping its summed area (negative) so the waves still
+			// take its head apart; at a cap of one everything makes one ordinary piece (its area positive).
+			const bool bSteadyApart = bSteady && Cap >= 2;
+			const bool bAreaPositive = bSteady && !bSteadyApart;
+			FRippleImpulseBin Nets[2];   // the ordinary pieces (all of them, unless the steady ones stay apart), and the steady ones
 			for (const FVector4f& Piece : Pieces)
 			{
+				FRippleImpulseBin& Net = Nets[bSteadyApart && Piece.W < 0.f ? 1 : 0];
 				const double PieceWeight = FMath::Abs(static_cast<double>(Piece.Z));
 				Net.Impulse += Piece.Z;
-				Net.Area += Piece.W;
+				Net.Area += bAreaPositive ? FMath::Abs(Piece.W) : Piece.W;
 				Net.Weight += PieceWeight;
 				Net.OffsetX += PieceWeight * (static_cast<double>(Piece.X) - BaseX);
 				Net.OffsetY += PieceWeight * (static_cast<double>(Piece.Y) - BaseY);
 			}
-			Pieces.Reset(1);
-			Pieces.Add(FVector4f(static_cast<float>(BaseX + Net.OffsetX / Net.Weight), static_cast<float>(BaseY + Net.OffsetY / Net.Weight),
-				static_cast<float>(Net.Impulse), static_cast<float>(Net.Area)));
+			Pieces.Reset(2);
+			for (const FRippleImpulseBin& Net : Nets)
+			{
+				// A kind with no pieces left (no ordinary ones beside the steady ones, say) makes none.
+				if (Net.Weight > 0.0)
+				{
+					Pieces.Add(FVector4f(static_cast<float>(BaseX + Net.OffsetX / Net.Weight), static_cast<float>(BaseY + Net.OffsetY / Net.Weight),
+						static_cast<float>(Net.Impulse), static_cast<float>(Net.Area)));
+				}
+			}
 		}
 	}
 }
@@ -3457,6 +3516,7 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 						Pieces.Reserve(FMath::Max(Slot->LastImpulsePieces, StepImpulses.Num()));   // last frame's count: one allocation a frame, not one a step
 					}
 					Pieces.Append(MoveTemp(StepImpulses));
+					Slot->bWaveImpulsesScaled = Body.bImpulsesScaled;
 				}
 				if (!Slot->LastOutput.IsValid())
 				{
@@ -3529,8 +3589,42 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 			FVector2f Flow = FVector2f::ZeroVector;
 			if (Patch->Sample(Slot.LastOutput->CenterOfMass.X, Slot.LastOutput->CenterOfMass.Y, Height, Rate, Flow))
 			{
+				// The current the body's physics takes (FWaterView::Sample): for a body that stirs the water itself, the water around it,
+				// not its own stirring under it (which read metres a second sideways under a fast boat, and turned the whitewater, the
+				// speed through the water and the propeller's advance with it).
+				const UPrimitiveComponent* Stirring = Component->GetSimulatedPrimitive();
+				const bool bAmbient = Patch->bAmbient
+					&& ((Component->bWake && UFluidNinjaBuoyancySettings::Get().WakesEnabled()) || (Stirring && Stirring->GetGenerateOverlapEvents()));
+				if (bAmbient)
+				{
+					Flow = Patch->AmbientAt(Slot.LastOutput->CenterOfMass.X, Slot.LastOutput->CenterOfMass.Y);
+				}
 				Readout.FlowCmS = FVector2D(Flow.X, Flow.Y);
 			}
+		}
+		// The way through the water and the trim, from the body as it is now; the propulsion and the wave resistance from the last step.
+		if (const UPrimitiveComponent* Moving = Component->GetSimulatedPrimitive())
+		{
+			const FVector Velocity = Moving->IsSimulatingPhysics() ? Moving->GetPhysicsLinearVelocity() : FVector::ZeroVector;
+			Readout.SpeedThroughWaterCmS = static_cast<float>(FVector2D(Velocity.X - Readout.FlowCmS.X, Velocity.Y - Readout.FlowCmS.Y).Size());
+			Readout.TrimDeg = static_cast<float>(FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Moving->GetForwardVector().Z, -1.0, 1.0))));
+		}
+		Readout.WaveResistanceN = static_cast<float>(Result.WaveResistance.Size() / 100.0);
+		Readout.DriftAngleDeg = Result.DriftAngleDeg;
+		Readout.KeelForceN = Result.KeelForce / 100.f;
+		Readout.ThrustN = Result.ThrustApplied / 100.f;
+		if (const FluidNinjaBuoyancy::FPropulsorResult& Propulsor = Result.Propulsor; Propulsor.bActive)
+		{
+			Readout.EngineRpm = Propulsor.EngineRpm;
+			Readout.PropRpm = Propulsor.ShaftRpm;
+			Readout.PropPowerKw = FMath::Max(Propulsor.Power, 0.f) * 1e-7f;   // kg·cm²/s³ to kW
+			Readout.EngineLoad = Propulsor.Load;
+			Readout.PropImmersion = Propulsor.Immersion;
+			Readout.bPropVentilated = Propulsor.bVentilated;
+			Readout.PropJetExcessCmS = FMath::Max(Propulsor.JetSpeed - FMath::Abs(Propulsor.AdvanceSpeed), 0.f);
+			Readout.Gear = Propulsor.Gear;
+			Readout.PropLocation = Propulsor.Location;
+			Readout.PropAxis = Propulsor.Axis;
 		}
 		Component->ReceiveReadout(Readout, Readout.SlamWatts, Slot.SlamLocation);
 		Slot.SlamWatts = 0.f;
@@ -3726,6 +3820,13 @@ void UFluidNinjaBuoyancySubsystem::PhysicsPreTick(FPhysScene_Chaos* Scene, float
 		// FluidNinja Waves: each wet piece's impulse into the water, every step (controlled water too: the test bench measures them there);
 		// how much of the others' waves the body feels, and the radiation damping of its own.
 		BodyInput.bWaveImpulses = bTakeWaveImpulses && Component->bWaves;
+		// A planing hull: its steady pressure apart from its transients, each scaled before the merge; and the depth under it for its wave
+		// resistance (the waves' depth there; deep water without waves).
+		BodyInput.Params.bSplitSteadyImpulses = BodyInput.bWaveImpulses && BodyInput.Params.HullFlow == FluidNinjaBuoyancy::EHullFlow::Planing;
+		BodyInput.bPreScaleImpulses = BodyInput.Params.bSplitSteadyImpulses;
+		BodyInput.SteadyImpulseScale = FMath::Max(Settings.WavePlaningPressureScale, 0.f);
+		BodyInput.TransientImpulseScale = FMath::Max(Settings.WaveImpulseScale, 0.f);
+		BodyInput.Params.WaterDepth = Waves ? Waves->GetBodyDepthCm(Slot.Id) : 0.f;
 		FFluidNinjaWaveBodyFeel Feel;
 		if (Waves && Waves->GetBodyFeel(Slot.Id, Feel))
 		{
@@ -3767,6 +3868,11 @@ void UFluidNinjaBuoyancySubsystem::UpdateLevelAndSleep(FSlot& Slot, const FVecto
 	}
 	Slot.DistanceLevel = Level;   // the gather's spacing follows it for every hull model
 	Slot.Level = FMath::Clamp(Level + FMath::Clamp(LodBias, 0, 2), 0, FMath::Max(Levels - 1, 0));
+	// A planing hull's lift comes from its bottom's facets: a coarser shell planes differently, so it stays on its finest hull.
+	if (Component->WantsFinestHull())
+	{
+		Slot.Level = 0;
+	}
 
 	// Sleep: settled, unseen and far. It wakes when seen, when the camera comes near, or when something wakes its body (a hit).
 	FBodyInstance* Body = Primitive->GetBodyInstance();
@@ -4656,14 +4762,79 @@ void UFluidNinjaBuoyancySubsystem::AddWaterImpulse(FVector Location, float Impul
 	{
 		return;
 	}
-	const double Cell = Waves->GetCellCm() > 0.0 ? Waves->GetCellCm() : 5.0;
+	// The wave cell and tick of the simulation the impulse lands in (the bench's window where none holds it).
+	const FVector2D WorldXY(Location);
+	const double CellAt = Waves->GetCellCmAt(WorldXY);
+	const double Cell = CellAt > 0.0 ? CellAt : 5.0;
 	const double Sigma = FMath::Max3(3.0 * 0.5 * FMath::Sqrt(FMath::Max(static_cast<double>(AreaCm2), 1.0) / UE_DOUBLE_PI),
 		static_cast<double>(FMath::Max(Settings.WaveSourceSmoothCm, 0.f)), Cell);
-	const double TickSeconds = 1.0 / FMath::Max(Waves->GetStepsPerSecond(), 1.0);
+	const double TickSeconds = 1.0 / FMath::Max(Waves->GetStepsPerSecondAt(WorldXY), 1.0);
 	const double Density = Settings.WaterDensity * 1.0e-6;   // kg/m³ to kg/cm³
 	const double Gravity = GetWorld() ? FMath::Max(-GetWorld()->GetGravityZ(), 1.0) : 980.0;
 	const double Head = ImpulseDown * FMath::Max(Settings.WaveImpulseScale, 0.f) / (Density * Gravity * TickSeconds * UE_DOUBLE_TWO_PI * Sigma * Sigma);
-	Waves->Poke(FVector2D(Location), static_cast<float>(Head), static_cast<float>(Sigma));
+	Waves->Poke(WorldXY, static_cast<float>(Head), static_cast<float>(Sigma));
+}
+
+void UFluidNinjaBuoyancySubsystem::AddWaterContact(const FFluidNinjaWaterContact& Contact)
+{
+	UWorld* World = GetWorld();
+	if (!World || Contact.Location.ContainsNaN())
+	{
+		return;
+	}
+	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
+	const FVector2D WorldXY(Contact.Location);
+	const float RadiusCm = FMath::IsFinite(Contact.RadiusCm) ? FMath::Clamp(Contact.RadiusCm, 0.5f, 200.f) : 5.f;
+	// The waves, split by wavelength so that the two parts are the impulse's whole spectrum once (FluidNinjaBuoyancyRings.h): the grid's
+	// share as a pressure head pressing for one of the simulation's ticks over a Gaussian of σ_g = max(2 wave cells, the band's σ) (the
+	// impulse ρ·g·H·Δt·2πσ_g² it puts in is Impulse Down at Wave Impulse Scale, as Add Water Impulse's), and the rest, from the band's σ
+	// down to σ_g, as a ring the surfaces draw.
+	if (Waves && FMath::IsFinite(Contact.ImpulseDown) && Contact.ImpulseDown != 0.f)
+	{
+		if (Settings.bWaveImpulse)
+		{
+			const double CellAt = Waves->GetCellCmAt(WorldXY);
+			const double Sigma = FluidNinjaBuoyancyRings::FState::GridSigmaCm(CellAt > 0.0 ? CellAt : 5.0, RadiusCm);
+			const double TickSeconds = 1.0 / FMath::Max(Waves->GetStepsPerSecondAt(WorldXY), 1.0);
+			const double Density = Settings.WaterDensity * 1.0e-6;   // kg/m³ to kg/cm³
+			const double Gravity = FMath::Max(-World->GetGravityZ(), 1.0);
+			const double Head = Contact.ImpulseDown * FMath::Max(Settings.WaveImpulseScale, 0.f) / (Density * Gravity * TickSeconds * UE_DOUBLE_TWO_PI * Sigma * Sigma);
+			if (Head != 0.0 && FMath::IsFinite(Head))
+			{
+				Waves->Poke(WorldXY, static_cast<float>(Head), static_cast<float>(Sigma));
+			}
+		}
+		if (FluidNinjaBuoyancyRings::IsOn())
+		{
+			Waves->AddRing(WorldXY, Contact.ImpulseDown, RadiusCm);
+		}
+	}
+	// The splash, pooled, from the budget the floating bodies spend (as a near body's: the whole budget).
+	if (FMath::IsFinite(Contact.SplashStrength) && Contact.SplashStrength > 0.f)
+	{
+		UNiagaraSystem* System = Contact.SplashSystem.Get();
+		if (!System)
+		{
+			if (ContactSplashPath != Settings.SplashSystem)
+			{
+				ContactSplashPath = Settings.SplashSystem;
+				ContactSplashSystem = ContactSplashPath.IsValid() ? Cast<UNiagaraSystem>(ContactSplashPath.TryLoad()) : nullptr;
+			}
+			System = ContactSplashSystem;
+		}
+		if (System && FluidNinjaBuoyancy::TakeSharedSplashBudget(0))
+		{
+			const FVector Up = Contact.SplashNormal.ContainsNaN() ? FVector::UpVector : Contact.SplashNormal.GetSafeNormal(UE_SMALL_NUMBER, FVector::UpVector);
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(World, System, Contact.Location, FRotationMatrix::MakeFromZ(Up).Rotator(), FVector(Contact.SplashStrength),
+				true, true, ENCPoolMethod::AutoRelease);
+			INC_DWORD_STAT(STAT_FNB_SplashSpawns);
+		}
+	}
+	// A little foam over the footprint, for a quarter of a second.
+	if (FMath::IsFinite(Contact.FoamRate) && Contact.FoamRate > 0.f)
+	{
+		AddWaterFoam(WorldXY, RadiusCm * 1.5f, Contact.FoamRate, 0.2f * Contact.FoamRate, 0.25f);
+	}
 }
 
 void UFluidNinjaBuoyancySubsystem::AddWavePoke(FVector2D WorldXY, float HeightCm, float SigmaCm)
@@ -4672,6 +4843,30 @@ void UFluidNinjaBuoyancySubsystem::AddWavePoke(FVector2D WorldXY, float HeightCm
 	{
 		Waves->Poke(WorldXY, HeightCm, SigmaCm);
 	}
+}
+
+void UFluidNinjaBuoyancySubsystem::AddWaterFoam(FVector2D WorldXY, float RadiusCm, float FreshRate, float AgedRate, float Seconds)
+{
+	const UWorld* World = GetWorld();
+	if (!World || WorldXY.ContainsNaN() || !FMath::IsFinite(RadiusCm) || !FMath::IsFinite(FreshRate) || !FMath::IsFinite(AgedRate) || !FMath::IsFinite(Seconds))
+	{
+		return;
+	}
+	FFluidNinjaWaterWash Wash;
+	Wash.Location = WorldXY;
+	Wash.RadiusCm = FMath::Max(RadiusCm, 1.f);
+	Wash.FreshRate = FMath::Max(FreshRate, 0.f);
+	Wash.AgedRate = FMath::Max(AgedRate, 0.f);
+	if (Wash.FreshRate <= 0.f && Wash.AgedRate <= 0.f)
+	{
+		return;
+	}
+	constexpr int32 MaxFoamPatches = 256;
+	if (FoamPatches.Num() >= MaxFoamPatches)
+	{
+		FoamPatches.RemoveAt(0);   // the oldest
+	}
+	FoamPatches.Emplace(Wash, World->GetTimeSeconds() + FMath::Max(Seconds, 0.f));
 }
 
 void UFluidNinjaBuoyancySubsystem::UpdateSwimmer(float DeltaSeconds)
@@ -4950,8 +5145,47 @@ void UFluidNinjaBuoyancySubsystem::TickWaves(float DeltaSeconds, bool bIdle)
 		FFluidNinjaWaveBodyImpulses& Pieces = Input.Impulses.AddDefaulted_GetRef();
 		Pieces.Id = Entry.Key;
 		Pieces.Pieces = MoveTemp(Entry.Value);
+		const FSlot* Scaled = FindSlot(Entry.Key);
+		Pieces.bScaled = Scaled && Scaled->bWaveImpulsesScaled;
 	}
 	PendingWaveImpulses.Reset();
+	// The bodies' stern ridges this frame (Stern Ridge Height Cm): steady pieces, scaled already, beside their physics pieces (into their
+	// simulation and their own field, so a body does not feel its own ridge).
+	for (const FSlot& Slot : Slots)
+	{
+		const UFluidNinjaBuoyancyComponent* Component = Slot.Component.Get();
+		if (Component && !Slot.bDormant && !Component->GetSternRidge().IsEmpty())
+		{
+			FFluidNinjaWaveBodyImpulses& Pieces = Input.Impulses.AddDefaulted_GetRef();
+			Pieces.Id = Slot.Id;
+			Pieces.Pieces = Component->GetSternRidge();
+			Pieces.bScaled = true;
+		}
+	}
+
+	// The whitewater the bodies wash into the foam this frame (their propellers, sterns and spray: each component's last tick), and
+	// AddWaterFoam's patches while they last. A patch's last frame (a Seconds 0 patch's only one) goes apart: nothing sends it again, so
+	// the waves keep it until a core tick reads it; the bodies' washes and a patch's earlier frames come again next frame.
+	for (const FSlot& Slot : Slots)
+	{
+		if (const UFluidNinjaBuoyancyComponent* Component = Slot.Component.Get(); Component && !Slot.bDormant)
+		{
+			Input.Washes.Append(Component->GetWashes());
+		}
+	}
+	const double FoamNow = World->GetTimeSeconds();
+	for (int32 Index = FoamPatches.Num() - 1; Index >= 0; --Index)
+	{
+		if (FoamNow >= FoamPatches[Index].Value)
+		{
+			Input.FinalFoamPatches.Add(FoamPatches[Index].Key);
+			FoamPatches.RemoveAt(Index);   // its last frame
+		}
+		else
+		{
+			Input.Washes.Add(FoamPatches[Index].Key);
+		}
+	}
 
 	Waves->Tick(DeltaSeconds, Input);
 	if (bBuildStatus)

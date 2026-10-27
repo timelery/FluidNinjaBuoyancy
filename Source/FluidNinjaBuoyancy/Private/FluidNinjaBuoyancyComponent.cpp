@@ -11,6 +11,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ScopeLock.h"
+#include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "Sound/SoundAttenuation.h"
@@ -100,6 +101,31 @@ namespace
 		TEXT("that had a wet line is written dry once. Set by sg.WaterQuality (off at Low)."),
 		ECVF_Scalability);
 
+	// The spray sheets (Spray Sheets on a body): whether they run at all, and how thick (sg.WaterQuality).
+	int32 EffectsSpraySheets = 1;
+	static FAutoConsoleVariableRef CVarEffectsSpraySheets(TEXT("fnb.Effects.SpraySheets"), EffectsSpraySheets,
+		TEXT("1 (the default; any value but 0): bodies with Spray Sheets on throw their whisker sheets and rooster tail while they drive fast through the water; 0: none ")
+		TEXT("(the sheets running die out; their landing foam stops). Set by sg.WaterQuality (off at Low and Medium)."),
+		ECVF_Scalability);
+	float EffectsSprayRateScale = 1.f;
+	static FAutoConsoleVariableRef CVarEffectsSprayRateScale(TEXT("fnb.Effects.SprayRateScale"), EffectsSprayRateScale,
+		TEXT("Scales how many drops every spray sheet throws (each body's Spray Sheet Rate times this): 0.5 halves the particles, 2 doubles them. Default 1; ")
+		TEXT("negative counts as 0. Set by sg.WaterQuality (0.5 / 0.75 / 0.75 / 1 / 1.5, Low to Cinematic)."),
+		ECVF_Scalability);
+
+	/** A spray sheet's drops at full strength (particles/s), and the most a sheet throws however fast the hull goes. */
+	constexpr float SheetParticlesPerSecond = 320.f;
+	constexpr float SheetMaxParticlesPerSecond = 900.f;
+	/** The whisker sheet leaves at this elevation above the water (degrees), outward from the hull, and the fastest it may go (cm/s). */
+	constexpr float SheetElevationDeg = 28.f;
+	constexpr float SheetMaxSpeedCmS = 1500.f;
+	/** A sheet runs from its start speed and stops below this share of it. */
+	constexpr float SheetHysteresis = 0.85f;
+	/** The linear drag that slows the sheets' drops (1/s). It mirrors the Drag module of NS_FNB_HullSpray (Tools/make_hull_spray.py,
+	 * INPUTS), so the landing foam goes where the drops come down: change both together. */
+	constexpr float SprayDropDragPerSecond = 0.35f;
+	static_assert(SprayDropDragPerSecond > 0.f, "the spray landing's reach divides by the drag");
+
 	/** Takes one splash from the frame's budget for a body of this reach; false when there is none left for it. */
 	bool TakeSplashBudget(int32 Reach)
 	{
@@ -119,6 +145,12 @@ namespace
 		++SplashesThisFrame;
 		return true;
 	}
+}
+
+bool FluidNinjaBuoyancy::TakeSharedSplashBudget(int32 Reach)
+{
+	// The same counter the bodies spend (the subsystem's water contacts take from it too).
+	return TakeSplashBudget(Reach);
 }
 
 UFluidNinjaBuoyancyComponent::UFluidNinjaBuoyancyComponent()
@@ -163,6 +195,11 @@ void UFluidNinjaBuoyancyComponent::FillParams(FluidNinjaBuoyancy::FParams& Out) 
 	Out.FlowCoupling = FlowCoupling;
 	Out.AirDragCoefficient = AirDragCoefficient;
 	Out.AngularDamping = AngularDamping;
+	// The keel, with or without propulsion (its aspect ratio divides by the area, which is above 0 whenever it acts).
+	Out.KeelLocal = KeelLocation;
+	Out.KeelArea = FMath::Max(KeelAreaCm2, 0.f);
+	Out.KeelDepth = FMath::Max(KeelDepthCm, 1.f);
+	Out.KeelCrossflow = FMath::Clamp(KeelCrossflowCoefficient, 0.f, 2.f);
 	Out.bPropulsion = bPropulsion;
 	Out.ThrustLocal = ThrustLocation;
 	Out.ThrustDirectionLocal = ThrustDirection.IsNearlyZero() ? FVector::ForwardVector : ThrustDirection;
@@ -172,6 +209,54 @@ void UFluidNinjaBuoyancyComponent::FillParams(FluidNinjaBuoyancy::FParams& Out) 
 	Out.RudderLocal = RudderLocation;
 	Out.RudderArea = RudderAreaCm2;
 	Out.RudderAngle = FMath::DegreesToRadians(MaxRudderAngle) * FMath::Clamp(Rudder, -1.f, 1.f);
+	Out.bSteerableThrust = bSteerableThrust;
+
+	// The hull's flow: planing on a triangle hull only (the point models have no faces to plane on).
+	const bool bPlaning = IsPlaningHull();
+	Out.HullFlow = bPlaning ? FluidNinjaBuoyancy::EHullFlow::Planing : FluidNinjaBuoyancy::EHullFlow::Displacement;
+	Out.PlaningPressureCoefficient = FMath::Clamp(PlaningPressureCoefficient, 0.1f, 1.5f);
+	Out.WaveResistanceScale = FMath::Clamp(WaveResistanceScale, 0.f, 3.f);
+	Out.HullPieceCm = FMath::Max(HullResolutionCm, 2.f);
+
+	// The propeller model, in the core's units (kg, cm, s).
+	Out.PropulsionModel = PropulsionModel == EFluidNinjaPropulsionModel::Propeller ? FluidNinjaBuoyancy::EPropulsionModel::Propeller
+		: FluidNinjaBuoyancy::EPropulsionModel::Simple;
+	if (Out.PropulsionModel == FluidNinjaBuoyancy::EPropulsionModel::Propeller)
+	{
+		Out.EnginePower = FMath::Clamp(EnginePowerKw, 1.f, 2000.f) * 1e7f;   // kW to kg·cm²/s³
+		Out.EngineMaxRpm = FMath::Clamp(EngineMaxRpm, 1000.f, 15000.f);
+		Out.EngineIdleRpm = FMath::Clamp(EngineIdleRpm, 300.f, 0.9f * Out.EngineMaxRpm);
+		Out.EngineResponseSeconds = FMath::Clamp(EngineResponseSeconds, 0.01f, 5.f);
+		Out.EngineInertia = FMath::Max(EngineInertiaKgM2, 0.001f) * 1e4f;   // kg·m² to kg·cm²
+		Out.GearRatio = FMath::Clamp(GearRatio, 0.25f, 10.f);
+		Out.PropDiameter = FMath::Clamp(PropDiameterCm, 5.f, 300.f);
+		// A bronze or steel propeller's own inertia grows with about the fifth power of its size; 200 kg·cm² at 28 cm (0.02 kg·m²).
+		Out.PropInertia = 200.f * FMath::Pow(Out.PropDiameter / 28.f, 5.f);
+		Out.PropWakeFraction = FMath::Clamp(PropWakeFraction, 0.f, 0.9f);
+		Out.ReverseEfficiency = FMath::Clamp(ReverseEfficiency, 0.f, 1.f);
+		Out.VentilatedFactor = FMath::Clamp(VentilatedThrustFactor, 0.f, 1.f);
+		Out.PropHand = bLeftHandedProp ? -1.f : 1.f;
+		// The open-water curves: the propeller's own (both curves given), else the generic series for its pitch ratio.
+		const FRichCurve* Thrust = PropThrustCurve.GetRichCurveConst();
+		const FRichCurve* TorqueCurve = PropTorqueCurve.GetRichCurveConst();
+		if (Thrust && TorqueCurve && Thrust->GetNumKeys() >= 2 && TorqueCurve->GetNumKeys() >= 2)
+		{
+			float MinTime = 0.f;
+			float MaxTime = 1.f;
+			Thrust->GetTimeRange(MinTime, MaxTime);
+			Out.PropTableStep = FMath::Max(MaxTime, 0.05f) / static_cast<float>(FluidNinjaBuoyancy::PropTableSize - 1);
+			for (int32 Index = 0; Index < FluidNinjaBuoyancy::PropTableSize; ++Index)
+			{
+				const float J = Index * Out.PropTableStep;
+				Out.PropKT[Index] = Thrust->Eval(J);
+				Out.PropKQ[Index] = TorqueCurve->Eval(J);
+			}
+		}
+		else
+		{
+			FluidNinjaBuoyancy::FillPropellerSeries(PropPitchRatio, Out);
+		}
+	}
 }
 
 float UFluidNinjaBuoyancyComponent::GetBottomZ() const
@@ -485,13 +570,66 @@ void UFluidNinjaBuoyancyComponent::BeginPlay()
 	UPrimitiveComponent* Primitive = GetSimulatedPrimitive();
 	if (USoundBase* Wash = LoadOr(WashSound, Settings.WashSound); Wash && Primitive && GetOwner())
 	{
-		WashAudio = NewObject<UAudioComponent>(GetOwner(), TEXT("FluidNinjaHullWash"));
+		WashAudio = NewObject<UAudioComponent>(GetOwner(), MakeUniqueObjectName(GetOwner(), UAudioComponent::StaticClass(), TEXT("FluidNinjaHullWash")));
 		WashAudio->bAutoActivate = false;
 		WashAudio->bAutoDestroy = false;
 		WashAudio->SetSound(Wash);
 		WashAudio->AttenuationSettings = LoadedAttenuation;
 		WashAudio->SetupAttachment(Primitive);
 		WashAudio->RegisterComponent();
+	}
+	// The engine loop (the propeller model), at the propeller; made on the first tick instead when the propeller model is taken up later.
+	if (bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller && Primitive)
+	{
+		MakeEngineAudio(*Primitive);
+	}
+	if (bSpraySheets)
+	{
+		LoadSheetSystem();
+	}
+}
+
+void UFluidNinjaBuoyancyComponent::MakeEngineAudio(UPrimitiveComponent& Primitive)
+{
+	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
+	bEngineAudioTried = true;
+	EngineAudioSoundTried = EngineSound.IsNull() ? Settings.EngineSound : EngineSound.ToSoftObjectPath();
+	AActor* Owner = GetOwner();
+	USoundBase* Loop = Owner ? LoadOr(EngineSound, Settings.EngineSound) : nullptr;
+	if (!Loop)
+	{
+		return;   // no engine sound set (the plugin ships none), or it did not load
+	}
+	EngineAudio = NewObject<UAudioComponent>(Owner, MakeUniqueObjectName(Owner, UAudioComponent::StaticClass(), TEXT("FluidNinjaEngine")));
+	EngineAudio->bAutoActivate = false;
+	EngineAudio->bAutoDestroy = false;
+	EngineAudio->SetSound(Loop);
+	EngineAudio->AttenuationSettings = LoadedAttenuation;
+	EngineAudio->SetupAttachment(&Primitive);
+	// Thrust Location is at world size (the body's scale is not applied to it), but a child's relative location is scaled by its parent's
+	// world scale: divided by that here, axis by axis, so the loop sits at the propeller at any scale.
+	const FVector BodyScale = Primitive.GetComponentScale();
+	FVector AtPropeller = ThrustLocation;
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		AtPropeller[Axis] = FMath::Abs(BodyScale[Axis]) > 1e-6 ? AtPropeller[Axis] / BodyScale[Axis] : 0.0;
+	}
+	EngineAudio->SetRelativeLocation(AtPropeller);
+	EngineAudio->RegisterComponent();
+}
+
+void UFluidNinjaBuoyancyComponent::LoadSheetSystem()
+{
+	const FSoftObjectPath& DefaultSheets = UFluidNinjaBuoyancySettings::Get().SpraySheetSystem;
+	bSheetSystemTried = true;
+	SheetSystemTried = SpraySheetSystem.IsNull() ? DefaultSheets : SpraySheetSystem.ToSoftObjectPath();
+	LoadedSheetSystem = LoadOr(SpraySheetSystem, DefaultSheets);
+	// An empty path is the documented "no sheets"; a system that is set and does not load is named once (it is not tried again until it
+	// changes).
+	if (!LoadedSheetSystem && SheetSystemTried.IsValid())
+	{
+		UE_LOG(LogFluidNinjaBuoyancy, Warning, TEXT("FluidNinja Buoyancy on %s: the Spray Sheet System %s did not load as a Niagara system, so the body throws no spray sheets. Set Spray Sheet System on the body, or Project Settings -> FluidNinja Buoyancy -> Effects -> Spray Sheet System, to a system with the user parameters SprayRate, SprayVelocity, SprayCone, DropletSize and WaterZ (NS_FNB_HullSpray)."),
+			*GetNameSafe(GetOwner()), *SheetSystemTried.ToString());
 	}
 }
 
@@ -611,13 +749,545 @@ void UFluidNinjaBuoyancyComponent::TickComponent(float DeltaTime, ELevelTick Tic
 	UPrimitiveComponent* Primitive = GetSimulatedPrimitive();
 	if (!Primitive || Hulls.IsEmpty() || DeltaTime <= 0.f)
 	{
+		Washes.Reset();   // a body not updated washes nothing (GetWashes hands out only this frame's in any case)
 		return;
 	}
 	UpdateEffectReach(*Primitive);
 	UpdateWetLine(*Primitive, DeltaTime);
 	UpdateSpray(DeltaTime);
+	UpdateSheetsAndWash(*Primitive, DeltaTime);
 	UpdateSound(*Primitive, DeltaTime);
+	UpdateEngineSound(*Primitive, DeltaTime);
 	FrameSlamWatts = 0.f;   // the sounds have had this frame's slam; the splash keeps its running max (PendingSlamWatts) until it fires
+}
+
+void UFluidNinjaBuoyancyComponent::DriveSheet(int32 Index, const FVector& Launch, const FVector& Velocity, float Rate, float ConeDeg, float DropletCm, float WaterZ)
+{
+	static const FName RateName(TEXT("User.SprayRate"));
+	static const FName VelocityName(TEXT("User.SprayVelocity"));
+	static const FName ConeName(TEXT("User.SprayCone"));
+	static const FName DropletName(TEXT("User.DropletSize"));
+	static const FName WaterZName(TEXT("User.WaterZ"));
+	if (Sheets.Num() <= Index)
+	{
+		Sheets.SetNum(Index + 1);
+	}
+	UNiagaraComponent* Sheet = Sheets[Index];
+	if (Rate <= 0.f)
+	{
+		// Stopped: no new drops, and the system deactivated, once, on the stop: the drops in the air fall and die where they land, and then
+		// the system completes instead of running on empty (NS_FNB_HullSpray loops forever while it is active).
+		if (Sheet)
+		{
+			Sheet->SetVariableFloat(RateName, 0.f);
+			if (Sheet->IsActive() && Sheet->GetRequestedExecutionState() == ENiagaraExecutionState::Active)
+			{
+				Sheet->Deactivate();
+			}
+		}
+		return;
+	}
+	if (!Sheet)
+	{
+		AActor* Owner = GetOwner();
+		if (!LoadedSheetSystem || !Owner)
+		{
+			return;
+		}
+		// Not attached: its drops live in the world, so the sheet left behind by a fast hull stays where it was thrown; the emitter is
+		// moved to its launch point every tick.
+		Sheet = NewObject<UNiagaraComponent>(Owner);
+		Sheet->SetAsset(LoadedSheetSystem);
+		Sheet->SetAutoActivate(false);
+		Sheet->SetAutoDestroy(false);
+		Sheet->SetUsingAbsoluteLocation(true);
+		Sheet->SetUsingAbsoluteRotation(true);
+		Sheet->SetUsingAbsoluteScale(true);
+		Sheet->RegisterComponent();
+		Sheets[Index] = Sheet;
+	}
+	Sheet->SetWorldLocation(Launch);
+	Sheet->SetVariableFloat(RateName, Rate);
+	Sheet->SetVariableVec3(VelocityName, Velocity);
+	Sheet->SetVariableFloat(ConeName, ConeDeg);
+	Sheet->SetVariableFloat(DropletName, DropletCm);
+	Sheet->SetVariableFloat(WaterZName, WaterZ);
+	// Started when it is not running: never started, completed, or still letting the last run's drops fall after a stop (a deactivated
+	// system counts as active until they have landed). Activating resets the system (EResetMode::ResetSystem), which keeps the
+	// particles: the drops still in the air fall on.
+	if (!Sheet->IsActive() || Sheet->GetRequestedExecutionState() != ENiagaraExecutionState::Active)
+	{
+		Sheet->Activate(true);
+	}
+}
+
+/** A push's level after a frame: up to its target at once, down toward it no faster than full to none in FadeSeconds (0: at once). */
+static float FadeLevel(float Level, float Target, float FadeSeconds, float DeltaTime)
+{
+	if (Target >= Level || FadeSeconds <= 0.f)
+	{
+		return Target;
+	}
+	return FMath::Max(Target, Level - DeltaTime / FadeSeconds);
+}
+
+void UFluidNinjaBuoyancyComponent::UpdateSheetsAndWash(UPrimitiveComponent& Primitive, float DeltaTime)
+{
+	Washes.Reset();
+	SternRidge.Reset();
+	WashesFrame = GFrameCounter;   // GetWashes hands these out this frame only
+	const UWorld* World = GetWorld();
+	const bool bLive = World && Readout.bInWater && !Readout.bDormant && !Hulls.IsEmpty() && Hulls[0].IsValid();
+	const FluidNinjaBuoyancy::FHull* Hull = bLive ? Hulls[0].Get() : nullptr;
+	const FTransform Frame(Primitive.GetComponentQuat(), Primitive.GetComponentLocation());
+	const FVector Forward = Frame.GetUnitAxis(EAxis::X).GetSafeNormal2D();
+	const FVector Right = Frame.GetUnitAxis(EAxis::Y).GetSafeNormal2D();
+	const FVector Velocity = Primitive.IsSimulatingPhysics() ? Primitive.GetPhysicsLinearVelocity() : FVector::ZeroVector;
+	const FVector Through(Velocity.X - Readout.FlowCmS.X, Velocity.Y - Readout.FlowCmS.Y, 0.0);
+	const float Speed = static_cast<float>(Through.Size());
+	const float Gravity = FMath::Max(1.f, World ? -World->GetGravityZ() : 980.f);
+	// The water at the hull: the mean height of its water line.
+	float WaterZ = static_cast<float>(Frame.GetLocation().Z);
+	if (!Contacts.IsEmpty())
+	{
+		double Sum = 0.0;
+		for (const FFluidNinjaWaterlineContact& Contact : Contacts)
+		{
+			Sum += Contact.Position.Z;
+		}
+		WaterZ = static_cast<float>(Sum / Contacts.Num());
+	}
+	// Where a drop launched at From with Launch lands on the water, and the patch it whitens there. The time it takes to fall back to WaterZ
+	// is gravity's alone; over that time the drops' linear drag k (SprayDropDragPerSecond, the system's own) slows their way over the
+	// water, so they carry x = v0 (1 - e^(-k t)) / k rather than v0 t (about 16 % shorter after a second in the air).
+	const auto Landing = [Gravity, WaterZ](const FVector& From, const FVector& Launch, FVector2D& OutWhere, float& OutReach)
+	{
+		const double Up = Launch.Z;
+		const double Drop = FMath::Max(From.Z - WaterZ, 0.0);
+		const double Seconds = (Up + FMath::Sqrt(FMath::Max(Up * Up + 2.0 * Gravity * Drop, 0.0))) / Gravity;
+		const double Drag = static_cast<double>(SprayDropDragPerSecond);
+		const double Carried = (1.0 - FMath::Exp(-Drag * Seconds)) / Drag;
+		OutWhere = FVector2D(From.X + Launch.X * Carried, From.Y + Launch.Y * Carried);
+		OutReach = static_cast<float>(FVector2D(Launch.X, Launch.Y).Size() * Carried);
+	};
+
+	// ---- The whitewater, into FluidNinja Waves' foam wash: small foam patches scattered over where real whitewater forms around a moving
+	// hull: fresh foam (bright, fading in seconds) and aged foam (the long pale lace). Four sources share the patch budget:
+	//   the propeller trail: one or more jets (Prop Wash Jets) merging into one broad band behind the stern;
+	//   the transom churn: the water closing behind a dry transom, a beam wide;
+	//   the quarter wakes: the diverging waves breaking off the transom corners, two ragged bands spreading at the wake angle, darker water
+	//     between them and the propeller trail;
+	//   the sides: the spray root's white rim running aft along the hull, and the bow wave breaking at the stem.
+	// Each patch's rate comes from the time a point of water spends under its source, so the foam reaches the same whiteness at any speed,
+	// patch size or count. A band whose patches the water passes along at V (trail, churn, sides) leaves F = rate x N 2 pi s^2 / (W V) over a
+	// band W wide; a band sweeping sideways over the water (a quarter wake at the wake angle a) leaves F = rate x N 2 pi s^2 / (L V sin a)
+	// over a band L long (N patches of spread s). Rates are per second at a patch's centre (FFluidNinjaWaterWash).
+	if (Hull && Speed > 30.f)
+	{
+		FRandomStream Rng(static_cast<int32>((GFrameCounter * 2654435761ull) ^ static_cast<uint64>(GetUniqueID())));
+		const float Ragged = FMath::Clamp(WhitewaterRaggedness, 0.f, 1.f);
+		const auto Gauss = [&Rng]() { return (Rng.FRand() + Rng.FRand() + Rng.FRand() - 1.5f) * 2.f; };   // about a unit normal
+		const auto Flicker = [&Rng, Ragged]() { return 1.f - Ragged * Rng.FRand(); };
+		const float HullLength = FMath::Max(Hull->BoundsMax.X - Hull->BoundsMin.X, 20.f);
+		const float Beam = FMath::Max(Hull->BoundsMax.Y - Hull->BoundsMin.Y, 20.f);
+		const float MidY = 0.5f * (Hull->BoundsMin.Y + Hull->BoundsMax.Y);
+		const FVector Back = -Through.GetSafeNormal2D(UE_SMALL_NUMBER, Forward);
+		const FVector Across(-Back.Y, Back.X, 0.0);
+		const FVector SternCentre = Frame.TransformPosition(FVector(Hull->BoundsMin.X, MidY, 0.0));
+		const FVector Centre = Frame.GetLocation();
+		const float Froude = Speed / FMath::Sqrt(Gravity * HullLength);
+		const float V = FMath::Max(Speed, 200.f);
+		const float TwoPi = 2.f * PI;
+		const auto Add = [this](const FVector& At, float Spread, float Fresh, float Aged)
+		{
+			if (!(Fresh > 0.f) && !(Aged > 0.f))
+			{
+				return;
+			}
+			FFluidNinjaWaterWash& Wash = Washes.AddDefaulted_GetRef();
+			Wash.Location = FVector2D(At.X, At.Y);
+			Wash.RadiusCm = Spread;
+			Wash.FreshRate = FMath::Max(Fresh, 0.f);
+			Wash.AgedRate = FMath::Max(Aged, 0.f);
+		};
+
+		// Which sources run, and how strongly.
+		const bool bJets = bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller && PropWashFoam > 0.f && Readout.Gear != 0
+			&& Readout.PropImmersion > 0.05f;
+		const float FanStrength = AirFanWashFoam > 0.f ? FMath::Clamp(AirFanThrottle, 0.f, 1.f) : 0.f;
+		const float JetStrength = bJets ? Readout.PropImmersion * FMath::Clamp(0.25f + Readout.PropJetExcessCmS / 400.f + 0.5f * Speed / 1500.f, 0.f, 1.5f) : 0.f;
+		const float Clear = 2.5f * FMath::Sqrt(Gravity * FMath::Max(RestingDraft > 0.f ? RestingDraft : RestDraftCm, 2.f));
+		const float SternRamp = IsPlaningHull() && SternWashFoam > 0.f ? FMath::SmoothStep(0.6f * Clear, 1.3f * Clear, Speed) : 0.f;
+		const float QuarterRamp = IsPlaningHull() && QuarterWakeFoam > 0.f ? FMath::SmoothStep(0.4f, 0.9f, Froude) : 0.f;
+		const float SideRamp = (IsPlaningHull() || bPropulsion) && HullSideFoam > 0.f && !Contacts.IsEmpty() ? FMath::SmoothStep(150.f, 600.f, Speed) : 0.f;
+		const float Weights[5] = {JetStrength > 0.01f ? 0.35f : 0.f, SternRamp > 0.f ? 0.15f : 0.f, QuarterRamp > 0.f ? 0.35f : 0.f, SideRamp > 0.f ? 0.15f : 0.f,
+			FanStrength > 0.01f ? 0.25f : 0.f};
+		const float WeightSum = Weights[0] + Weights[1] + Weights[2] + Weights[3] + Weights[4];
+		const int32 Budget = FMath::Clamp(WhitewaterPatches, 16, 600) / (EffectReach <= 1 ? 1 : 4);
+		const auto Share = [&](int32 Index) { return WeightSum > 0.f ? FMath::Max(FMath::RoundToInt32(Budget * Weights[Index] / WeightSum), Weights[Index] > 0.f ? 4 : 0) : 0; };
+		const float MinSpread = 25.f;   // cm, about a wave cell: finer patches fall between the cells
+
+		// The propeller trail: each jet's boil behind the disc, the jets spreading at about 7 degrees and merging; denser near the stern.
+		if (const int32 N = Share(0); N > 0)
+		{
+			const int32 Jets = FMath::Clamp(PropWashJets, 1, 4);
+			const float Diameter = FMath::Max(PropDiameterCm, 5.f);
+			FVector Jet = -Readout.PropAxis * static_cast<double>(Readout.Gear);
+			Jet.Z = 0.0;
+			Jet = Jet.GetSafeNormal(UE_SMALL_NUMBER, Back);
+			const FVector JetSide(-Jet.Y, Jet.X, 0.0);
+			const float JetLength = 12.f * Diameter + 0.8f * HullLength;
+			const float Slope = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(PropWashSpreadDeg, 0.f, 20.f)));
+			const float Spacing = FMath::Max(PropWashJetSpacingCm, 0.f);
+			const float Width = (Jets - 1) * Spacing + 2.f * Diameter + JetLength * Slope;
+			const float Merge = 4.f * Diameter + 0.3f * HullLength;
+			for (int32 Index = 0; Index < N; ++Index)
+			{
+				const float Offset = (static_cast<float>(Index % Jets) - 0.5f * static_cast<float>(Jets - 1)) * Spacing;
+				const float U = Rng.FRand();
+				const float Along = JetLength * U * U;
+				const float Spread = FMath::Max(0.35f * Diameter + 0.06f * Along, MinSpread) * (0.75f + 0.5f * Rng.FRand());
+				const float Lateral = Offset * FMath::Exp(-Along / Merge) + Gauss() * (0.25f * Diameter + Along * Slope) * (0.5f + Ragged);
+				const FVector At = Readout.PropLocation + Jet * (Along + Gauss() * Ragged * Spread) + JetSide * Lateral;
+				const float Rate = Width * V / (static_cast<float>(N) * TwoPi * Spread * Spread) * FMath::Exp(-Along / (0.6f * JetLength)) * Flicker();
+				Add(At, Spread, 2.5f * PropWashFoam * JetStrength * Rate, 0.8f * PropWashFoam * JetStrength * Rate);
+			}
+		}
+
+		// The air fan's slipstream: one broad, soft stream about the fan's width, from the transom (or the fan, behind it) back along the
+		// hull's axis, widening at the spread angle and fading aft; milder than a propeller's boil, and denser near the stern.
+		if (const int32 N = Share(4); N > 0)
+		{
+			const float Diameter = FMath::Clamp(AirFanDiameterCm, 50.f, 400.f);
+			const FVector Blow = -Forward;
+			const FVector BlowSide(-Blow.Y, Blow.X, 0.0);
+			const FVector Origin = Frame.TransformPosition(FVector(FMath::Min(static_cast<double>(Hull->BoundsMin.X), AirFanLocation.X), AirFanLocation.Y, 0.0));
+			const float StreamLength = 4.f * Diameter + 0.6f * HullLength;
+			const float Slope = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(AirFanWashSpreadDeg, 0.f, 30.f)));
+			const float Width = Diameter + StreamLength * Slope;
+			for (int32 Index = 0; Index < N; ++Index)
+			{
+				const float U = Rng.FRand();
+				const float Along = StreamLength * U * U;
+				const float Spread = FMath::Max(0.3f * Diameter + 0.08f * Along, MinSpread) * (0.75f + 0.5f * Rng.FRand());
+				const float Lateral = Gauss() * (0.3f * Diameter + Along * Slope) * (0.5f + Ragged);
+				const FVector At = Origin + Blow * (Along + Gauss() * Ragged * Spread) + BlowSide * Lateral;
+				const float Rate = Width * V / (static_cast<float>(N) * TwoPi * Spread * Spread) * FMath::Exp(-Along / (0.6f * StreamLength)) * Flicker();
+				Add(At, Spread, 2.5f * AirFanWashFoam * FanStrength * Rate, 0.8f * AirFanWashFoam * FanStrength * Rate);
+			}
+		}
+
+		// The transom churn: across the beam, from the transom back about half a beam plus a sixth of the hull's length.
+		if (const int32 N = Share(1); N > 0)
+		{
+			const float Reach = 0.6f * Beam + 0.15f * HullLength;
+			const float Width = 0.9f * Beam;
+			for (int32 Index = 0; Index < N; ++Index)
+			{
+				const float Along = Reach * Rng.FRand();
+				const float Spread = FMath::Max(0.12f * Beam, MinSpread) * (0.6f + 0.8f * Rng.FRand());
+				const FVector At = SternCentre + Back * (Along + Gauss() * Ragged * Spread) + Across * ((Rng.FRand() - 0.5f) * Width);
+				const float Rate = Width * V / (static_cast<float>(N) * TwoPi * Spread * Spread) * FMath::Exp(-Along / (0.6f * Reach)) * Flicker();
+				Add(At, Spread, 2.f * SternWashFoam * SternRamp * Rate, 0.5f * SternWashFoam * SternRamp * Rate);
+			}
+		}
+
+		// The quarter wakes: from each transom corner along the wake angle (Kelvin's 19.47 degrees, narrowing above a length Froude number of
+		// about 0.6 as 1 / (sqrt(2 pi) Fr), Rabaud and Moisy 2013), ragged across the band, fading along it.
+		if (const int32 N = Share(2); N > 0)
+		{
+			const float Alpha = FMath::Min(0.3398f, 1.f / (FMath::Sqrt(TwoPi) * FMath::Max(Froude, 0.01f))) * FMath::Clamp(QuarterWakeAngleScale, 0.2f, 1.5f);
+			const float SinAlpha = FMath::Max(FMath::Sin(Alpha), 0.05f);
+			const float CosAlpha = FMath::Cos(Alpha);
+			const float ArmLength = FMath::Clamp(QuarterWakeLength, 0.5f, 10.f) * HullLength;
+			const float ArmStart = FMath::Clamp(QuarterWakeStart, 0.f, 2.f) * HullLength;   // where the crests start breaking, behind the corner
+			const int32 PerArm = FMath::Max(N / 2, 2);
+			const float RootOut = FMath::Clamp(QuarterWakeOffset, 0.f, 1.f) * Beam;   // where the breaking starts, outside each corner
+			// The breaking crests (Quarter Wake Crest Spacing Cm): diagonal streaks fixed on the water, so the foam each crest leaves stays
+			// where it broke while the boat runs on. Crests run outward and aft at 55 degrees to the track; Spacing is along the track.
+			const float CrestSpacing = FMath::Clamp(QuarterWakeCrestSpacingCm, 0.f, 2000.f);
+			const float CrestStrength = CrestSpacing >= 10.f ? FMath::Clamp(QuarterWakeCrestStrength, 0.f, 1.f) : 0.f;
+			const float CrestAngle = FMath::DegreesToRadians(55.f);
+			const double CrestPeriod = CrestSpacing * FMath::Sin(CrestAngle);   // across the crests
+			for (int32 Side = 0; Side < 2; ++Side)
+			{
+				const float CornerY = Side == 0 ? Hull->BoundsMin.Y + 0.08f * Beam : Hull->BoundsMax.Y - 0.08f * Beam;
+				const FVector Corner = Frame.TransformPosition(FVector(Hull->BoundsMin.X, CornerY, 0.0));
+				const double Sign = FVector::DotProduct(Corner - SternCentre, Across) >= 0.0 ? 1.0 : -1.0;
+				const FVector Out = Across * Sign;
+				const FVector Arm = Back * CosAlpha + Out * SinAlpha;
+				const FVector Root = Corner + Out * RootOut;
+				const FVector CrestLine = Back * FMath::Cos(CrestAngle) + Out * FMath::Sin(CrestAngle);
+				const FVector CrestNormal = Back * FMath::Sin(CrestAngle) - Out * FMath::Cos(CrestAngle);
+				for (int32 Index = 0; Index < PerArm; ++Index)
+				{
+					const float Breaking = ArmLength * FMath::Pow(Rng.FRand(), 1.5f);   // along the breaking band, from its start
+					const float Along = ArmStart + Breaking;
+					const float Spread = FMath::Max(0.06f * Beam + 0.02f * Along, MinSpread) * (0.6f + 0.8f * Rng.FRand());
+					const FVector At = Root + Arm * (Along + Gauss() * Ragged * Spread) + Out * (Gauss() * (0.1f * Beam + 0.05f * Along) * (0.4f + Ragged));
+					// On a crest c = 1, between crests 0; the crest lines wander a little so they do not read as ruled. c^2 x 8/3 averages 1.
+					float Crest = 1.f;
+					if (CrestStrength > 0.f)
+					{
+						const double CrestU = FVector::DotProduct(At, CrestNormal) / CrestPeriod;
+						const double CrestV = FVector::DotProduct(At, CrestLine) / CrestSpacing;
+						const double Phase = CrestU + 0.25 * FMath::Sin(2.0 * UE_DOUBLE_PI * CrestV / 1.7) + 0.15 * FMath::Sin(2.0 * UE_DOUBLE_PI * CrestU / 3.1);
+						const float C = 0.5f + 0.5f * static_cast<float>(FMath::Cos(2.0 * UE_DOUBLE_PI * Phase));
+						Crest = 1.f - CrestStrength + CrestStrength * C * C * (8.f / 3.f);
+					}
+					const float Rate = ArmLength * V * SinAlpha / (static_cast<float>(PerArm) * TwoPi * Spread * Spread) * FMath::Exp(-Breaking / (0.45f * ArmLength)) * Flicker() * Crest;
+					Add(At, Spread, 1.6f * QuarterWakeFoam * QuarterRamp * Rate, 0.6f * QuarterWakeFoam * QuarterRamp * Rate);
+				}
+			}
+		}
+
+		// The stern ridge (Stern Ridge Height Cm): a steady upward push along the track behind the dry transom, strongest half way back (a
+		// sin² profile), Stern Ridge Width wide at half height. Pieces about 0.75 σ apart along the track; the splat spreads each over
+		// σ = FNB_WAVE_SPLAT_SPREAD (3) x half its area's disc radius, so the area that gives σ goes in as the piece's (negative: steady).
+		// Each piece's impulse is the head's over the strip it stands for (its length along, the Gaussian's σ √(2π) across) over the frame.
+		if (SternRidgeHeightCm > 0.f && IsPlaningHull())
+		{
+			SternRidgeLevel = FadeLevel(SternRidgeLevel, FMath::SmoothStep(0.6f * Clear, 1.3f * Clear, Speed), SternWaveFadeSeconds, DeltaTime);
+			const float Ramp = SternRidgeLevel;
+			const float Length = FMath::Clamp(SternRidgeLength, 0.1f, 4.f) * HullLength;
+			const float Sigma = FMath::Max(FMath::Clamp(SternRidgeWidth, 0.1f, 2.f) * Beam / 2.3548f, 15.f);
+			const int32 Count = FMath::Clamp(FMath::CeilToInt32(Length / FMath::Max(0.75f * Sigma, 10.f)), 2, 64);
+			const float Strip = Length / static_cast<float>(Count);
+			const float SplatArea = PI * FMath::Square(2.f * Sigma / 3.f);
+			constexpr float WaterDensity = 0.001f;   // kg/cm³
+			for (int32 Index = 0; Ramp > 0.f && Index < Count; ++Index)
+			{
+				const float Behind = (static_cast<float>(Index) + 0.5f) * Strip;
+				const float Head = FMath::Clamp(SternRidgeHeightCm, 0.f, 80.f) * Ramp * FMath::Square(FMath::Sin(PI * Behind / Length));
+				const FVector At = SternCentre + Back * Behind;
+				const float Impulse = -WaterDensity * Gravity * Head * Sigma * FMath::Sqrt(TwoPi) * Strip * DeltaTime;
+				SternRidge.Add(FVector4f(static_cast<float>(At.X), static_cast<float>(At.Y), Impulse, -SplatArea));
+			}
+		}
+
+		// The quarter waves' lift (Quarter Wake Lift Cm): the same steady upward push along each quarter wake's line (its root Quarter Wake
+		// Offset outside the corner, Quarter Wake Start behind it, at the wake angle the quarter wakes' whitewater takes), a sin² profile
+		// over Quarter Wake Lift Length, Quarter Wake Lift Width wide at half height, once the hull is on the plane (the quarter wakes' ramp).
+		if (QuarterWakeLiftCm > 0.f && IsPlaningHull())
+		{
+			QuarterLiftLevel = FadeLevel(QuarterLiftLevel, FMath::SmoothStep(0.4f, 0.9f, Froude), SternWaveFadeSeconds, DeltaTime);
+			const float Ramp = QuarterLiftLevel;
+			const float Angle = FMath::Min(0.3398f, 1.f / (FMath::Sqrt(TwoPi) * FMath::Max(Froude, 0.01f))) * FMath::Clamp(QuarterWakeAngleScale, 0.2f, 1.5f);
+			const float Length = FMath::Clamp(QuarterWakeLiftLength, 0.2f, 4.f) * HullLength;
+			const float Start = FMath::Clamp(QuarterWakeStart, 0.f, 2.f) * HullLength;
+			const float Sigma = FMath::Max(FMath::Clamp(QuarterWakeLiftWidth, 0.1f, 2.f) * Beam / 2.3548f, 15.f);
+			const int32 Count = FMath::Clamp(FMath::CeilToInt32(Length / FMath::Max(0.75f * Sigma, 10.f)), 2, 64);
+			const float Strip = Length / static_cast<float>(Count);
+			const float SplatArea = PI * FMath::Square(2.f * Sigma / 3.f);
+			constexpr float WaterDensity = 0.001f;   // kg/cm³
+			for (int32 Side = 0; Ramp > 0.f && Side < 2; ++Side)
+			{
+				const float CornerY = Side == 0 ? Hull->BoundsMin.Y + 0.08f * Beam : Hull->BoundsMax.Y - 0.08f * Beam;
+				const FVector Corner = Frame.TransformPosition(FVector(Hull->BoundsMin.X, CornerY, 0.0));
+				const FVector Out = Across * (FVector::DotProduct(Corner - SternCentre, Across) >= 0.0 ? 1.0 : -1.0);
+				const FVector Line = Back * FMath::Cos(Angle) + Out * FMath::Sin(Angle);
+				const FVector Root = Corner + Out * (FMath::Clamp(QuarterWakeOffset, 0.f, 1.f) * Beam);
+				for (int32 Index = 0; Index < Count; ++Index)
+				{
+					const float Along = (static_cast<float>(Index) + 0.5f) * Strip;
+					const float Head = FMath::Clamp(QuarterWakeLiftCm, 0.f, 80.f) * Ramp * FMath::Square(FMath::Sin(PI * Along / Length));
+					const FVector At = Root + Line * (Start + Along);
+					const float Impulse = -WaterDensity * Gravity * Head * Sigma * FMath::Sqrt(TwoPi) * Strip * DeltaTime;
+					SternRidge.Add(FVector4f(static_cast<float>(At.X), static_cast<float>(At.Y), Impulse, -SplatArea));
+				}
+			}
+		}
+
+		// The sides: the spray root's rim on the water line from about mid-length aft (whiter toward the transom), just outside the hull, and
+		// wherever the hull drives hard into the water (the bow wave breaking at the stem).
+		if (const int32 N = Share(3); N > 0)
+		{
+			const float Width = 0.4f * Beam;
+			for (int32 Index = 0; Index < N; ++Index)
+			{
+				const FFluidNinjaWaterlineContact& Contact = Contacts[Rng.RandRange(0, Contacts.Num() - 1)];
+				const FVector Facing(Contact.Outward.X, Contact.Outward.Y, 0.0);
+				const double Ahead = FVector::DotProduct(Contact.Position - Centre, Forward);
+				const bool bSide = FMath::Abs(FVector::DotProduct(Facing.GetSafeNormal(), Right)) > 0.3;
+				const float Rim = bSide ? 1.f - FMath::SmoothStep(-0.45f * HullLength, 0.2f * HullLength, static_cast<float>(Ahead)) : 0.f;
+				const float Bow = FMath::Clamp(Contact.Push / 400.f, 0.f, 1.5f);
+				const float Weight = FMath::Max(Rim, Bow);
+				if (Weight < 0.02f)
+				{
+					continue;
+				}
+				const float Spread = FMath::Max(0.05f * Beam, MinSpread) * (0.7f + 0.6f * Rng.FRand());
+				const FVector At = Contact.Position + Facing.GetSafeNormal() * (0.8f * Spread + 10.f + Rng.FRand() * Ragged * 0.15f * Beam)
+					+ Back * (Gauss() * Ragged * Spread);
+				const float Rate = Width * V / (static_cast<float>(N) * TwoPi * Spread * Spread) * Weight * Flicker();
+				Add(At, Spread, 1.2f * HullSideFoam * SideRamp * Rate, 0.3f * HullSideFoam * SideRamp * Rate);
+			}
+		}
+	}
+
+	// The stern ridge and the quarter lift die away at their fade while the hull is too slow (or out of the water) to push them.
+	if (!(Hull && Speed > 30.f))
+	{
+		SternRidgeLevel = FadeLevel(SternRidgeLevel, 0.f, SternWaveFadeSeconds, DeltaTime);
+		QuarterLiftLevel = FadeLevel(QuarterLiftLevel, 0.f, SternWaveFadeSeconds, DeltaTime);
+	}
+
+	// The spray sheets.
+	const bool bSheets = Hull && bSpraySheets && EffectsSpraySheets != 0 && EffectReach <= 1;
+	if (bSheets && !LoadedSheetSystem)
+	{
+		// Spray Sheets turned on after Begin Play, or a system that did not load: tried once per system (Spray Sheet System, else the
+		// project's), not again every tick until that changes.
+		const FSoftObjectPath& DefaultSheets = UFluidNinjaBuoyancySettings::Get().SpraySheetSystem;
+		if (!bSheetSystemTried || (SpraySheetSystem.IsNull() ? DefaultSheets : SpraySheetSystem.ToSoftObjectPath()) != SheetSystemTried)
+		{
+			LoadSheetSystem();
+		}
+	}
+	const float RateScale = FMath::Max(SpraySheetRate, 0.f) * FMath::Max(EffectsSprayRateScale, 0.f);
+	const float Deadrise = FMath::DegreesToRadians(FMath::Clamp(SprayDeadriseDeg, 0.f, 45.f));
+	const float Elevation = FMath::DegreesToRadians(SheetElevationDeg);
+	const FVector HullCentre = Frame.GetLocation();
+	const float Length = Hull ? FMath::Max(Hull->BoundsMax.X - Hull->BoundsMin.X, 1.f) : 1.f;
+	// Whisker sheets: off each side where the water line drives in hardest, forward of the stern's last third, launched at 2 V sin β out
+	// and up (in the water's frame) with a little of the hull's way.
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const float Sign = Side == 0 ? -1.f : 1.f;   // port, starboard
+		const FFluidNinjaWaterlineContact* Root = nullptr;
+		if (bSheets)
+		{
+			for (const FFluidNinjaWaterlineContact& Contact : Contacts)
+			{
+				const double Across = FVector::DotProduct(Contact.Outward, Right) * Sign;
+				const double Ahead = FVector::DotProduct(Contact.Position - HullCentre, Forward);
+				if (Across > 0.3 && Ahead > -Length / 6.0 && Contact.Push > 0.f && (!Root || Contact.Push > Root->Push))
+				{
+					Root = &Contact;
+				}
+			}
+		}
+		const float Start = FMath::Max(SpraySheetMinSpeedCmS, 1.f);
+		const bool bRun = Root && Speed >= (bSheetOn[Side] ? SheetHysteresis * Start : Start);
+		bSheetOn[Side] = bRun;
+		if (!bRun)
+		{
+			DriveSheet(Side, FVector::ZeroVector, FVector::ZeroVector, 0.f, 0.f, 0.f, 0.f);
+			continue;
+		}
+		const FVector Out = FVector(Root->Outward.X, Root->Outward.Y, 0.0).GetSafeNormal();
+		const float SheetSpeed = FMath::Min(2.f * Speed * FMath::Sin(FMath::Max(Deadrise, FMath::DegreesToRadians(6.f))), SheetMaxSpeedCmS);
+		const FVector Launch = Out * (SheetSpeed * FMath::Cos(Elevation)) + FVector::UpVector * (SheetSpeed * FMath::Sin(Elevation)) + Through.GetSafeNormal() * (0.1f * Speed);
+		const float Rate = FMath::Min(SheetParticlesPerSecond * ((Speed - Start) / Start + 0.3f), SheetMaxParticlesPerSecond) * RateScale;
+		const FVector From = Root->Position + Out * 8.0 + FVector(0.0, 0.0, 3.0);
+		DriveSheet(Side, From, Launch, Rate, 18.f, 4.f, static_cast<float>(Root->Position.Z));
+		if (SprayLandingFoam > 0.f && Rate > 0.f)
+		{
+			FFluidNinjaWaterWash& Wash = Washes.AddDefaulted_GetRef();
+			float Reach = 0.f;
+			Landing(From, Launch, Wash.Location, Reach);
+			Wash.RadiusCm = FMath::Max(0.3f * Reach, 30.f);
+			Wash.FreshRate = SprayLandingFoam * 1.5f * FMath::Min(Rate / SheetParticlesPerSecond, 2.f);
+			Wash.AgedRate = 0.2f * Wash.FreshRate;
+		}
+	}
+	// The rooster tail: thrown up behind a fast propelled planing stern (a planing Triangles hull, as for the stern's whitewater), falling
+	// behind the boat.
+	{
+		const float Start = FMath::Max(RoosterTailMinSpeedCmS, 1.f);
+		const bool bRun = bSheets && bRoosterTail && bPropulsion && IsPlaningHull() && Speed >= (bSheetOn[2] ? SheetHysteresis * Start : Start);
+		bSheetOn[2] = bRun;
+		if (!bRun)
+		{
+			DriveSheet(2, FVector::ZeroVector, FVector::ZeroVector, 0.f, 0.f, 0.f, 0.f);
+		}
+		else
+		{
+			const FVector Stern = Frame.TransformPosition(FVector(Hull->BoundsMin.X - 40.f, 0.5f * (Hull->BoundsMin.Y + Hull->BoundsMax.Y), 0.0));
+			const FVector From(Stern.X, Stern.Y, WaterZ + 5.f);
+			const FVector Launch = FVector::UpVector * FMath::Min(0.3f * Speed, 700.f) - Forward * (0.1f * Speed);
+			const float Rate = FMath::Min(0.8f * SheetParticlesPerSecond * ((Speed - Start) / Start + 0.3f), SheetMaxParticlesPerSecond) * RateScale;
+			DriveSheet(2, From, Launch, Rate, 14.f, 5.f, WaterZ);
+			if (SprayLandingFoam > 0.f && Rate > 0.f)
+			{
+				FFluidNinjaWaterWash& Wash = Washes.AddDefaulted_GetRef();
+				float Reach = 0.f;
+				Landing(From, Launch, Wash.Location, Reach);
+				Wash.RadiusCm = FMath::Max(0.4f * Reach, 50.f);
+				Wash.FreshRate = SprayLandingFoam * 2.f * FMath::Min(Rate / SheetParticlesPerSecond, 2.f);
+				Wash.AgedRate = 0.3f * Wash.FreshRate;
+			}
+		}
+	}
+}
+
+const TArray<FFluidNinjaWaterWash>& UFluidNinjaBuoyancyComponent::GetWashes() const
+{
+	// This frame's only: a body whose tick has stopped (turned off, or no hull) would otherwise wash its last frame's whitewater into the
+	// foam for ever. The component ticks in TG_PostPhysics, and the subsystem reads this after the tick groups of the same frame.
+	static const TArray<FFluidNinjaWaterWash> NoWashes;
+	return WashesFrame == GFrameCounter ? Washes : NoWashes;
+}
+
+const TArray<FVector4f>& UFluidNinjaBuoyancyComponent::GetSternRidge() const
+{
+	static const TArray<FVector4f> NoRidge;
+	return WashesFrame == GFrameCounter ? SternRidge : NoRidge;
+}
+
+void UFluidNinjaBuoyancyComponent::UpdateEngineSound(UPrimitiveComponent& Primitive, float DeltaTime)
+{
+	// The engine loop is made the first time the propeller model runs, so a Propulsion Model set after Begin Play gets one too. A sound
+	// that did not load is not tried again every tick: only once the propeller model is left and taken up again, or the sound (Engine
+	// Sound, else the project's) changes.
+	if (!EngineAudio)
+	{
+		if (!bPropulsion || PropulsionModel != EFluidNinjaPropulsionModel::Propeller)
+		{
+			bEngineAudioTried = false;
+			return;
+		}
+		const FSoftObjectPath& DefaultEngine = UFluidNinjaBuoyancySettings::Get().EngineSound;
+		if (bEngineAudioTried && (EngineSound.IsNull() ? DefaultEngine : EngineSound.ToSoftObjectPath()) == EngineAudioSoundTried)
+		{
+			return;
+		}
+		MakeEngineAudio(Primitive);
+		if (!EngineAudio)
+		{
+			return;
+		}
+	}
+	const bool bRun = bPropulsion && PropulsionModel == EFluidNinjaPropulsionModel::Propeller && !Readout.bDormant && SoundVolume > 0.f;
+	if (!bRun)
+	{
+		if (EngineAudio->IsPlaying())
+		{
+			EngineAudio->Stop();
+		}
+		return;
+	}
+	if (!EngineAudio->IsPlaying())
+	{
+		EngineAudio->Play();
+		for (float& Sent : EngineSent)
+		{
+			Sent = -1.f;   // a fresh play starts with every value sent
+		}
+	}
+	EngineAudio->SetVolumeMultiplier(SoundVolume);
+	// Each value goes to the audio thread only when it moves: the rpm by 10, the load and throttle by 0.02, the speed by 5 cm/s.
+	const float Values[5] = {Readout.EngineRpm, Readout.EngineLoad, FMath::Abs(Throttle), Readout.bPropVentilated ? 1.f : 0.f, Readout.SpeedThroughWaterCmS};
+	const float Steps[5] = {10.f, 0.02f, 0.02f, 0.f, 5.f};
+	static const FName Names[5] = {FName(TEXT("RPM")), FName(TEXT("Load")), FName(TEXT("Throttle")), FName(TEXT("Ventilated")), FName(TEXT("Speed"))};
+	for (int32 Index = 0; Index < 5; ++Index)
+	{
+		if (FMath::Abs(Values[Index] - EngineSent[Index]) > Steps[Index])
+		{
+			EngineAudio->SetFloatParameter(Names[Index], Values[Index]);
+			EngineSent[Index] = Values[Index];
+		}
+	}
 }
 
 void UFluidNinjaBuoyancyComponent::UpdateEffectReach(const UPrimitiveComponent& Primitive)
@@ -1020,6 +1690,19 @@ void UFluidNinjaBuoyancyComponent::EndPlay(const EEndPlayReason::Type Reason)
 	{
 		WashAudio->Stop();
 	}
+	if (EngineAudio)
+	{
+		EngineAudio->Stop();
+	}
+	for (UNiagaraComponent* Sheet : Sheets)
+	{
+		if (Sheet)
+		{
+			Sheet->DestroyComponent();
+		}
+	}
+	Sheets.Reset();
+	Washes.Reset();
 	if (UWorld* World = GetWorld())
 	{
 		if (UFluidNinjaBuoyancySubsystem* Hydro = World->GetSubsystem<UFluidNinjaBuoyancySubsystem>())
@@ -1096,12 +1779,19 @@ void UFluidNinjaBuoyancyComponent::ReceiveReadout(const FFluidNinjaBuoyancyReado
 
 FString UFluidNinjaBuoyancyComponent::GetStatus() const
 {
-	return FString::Printf(TEXT("%s: %s, hull level %d, %.0f L displaced, %.2f m2 wet, force (%.0f, %.0f, %.0f) N, mass %.0f kg, water %s, current (%.0f, %.0f) cm/s%s%s"),
+	return FString::Printf(TEXT("%s: %s, hull level %d, %.0f L displaced, %.2f m2 wet, force (%.0f, %.0f, %.0f) N, mass %.0f kg, water %s, current (%.0f, %.0f) cm/s%s%s%s"),
 		*GetNameSafe(GetOwner()), Readout.bDormant ? TEXT("asleep") : Readout.bInWater ? TEXT("in water") : TEXT("dry"), Readout.HullLevel, Readout.DisplacedLitres, Readout.WettedAreaM2,
 		Readout.ForceN.X, Readout.ForceN.Y, Readout.ForceN.Z, Readout.MassKg,
 		Readout.WaterAgeSeconds >= 0.f ? *FString::Printf(TEXT("%.0f ms old"), Readout.WaterAgeSeconds * 1000.f) : TEXT("far field (water volume)"),
 		Readout.FlowCmS.X, Readout.FlowCmS.Y,
-		bPropulsion ? *FString::Printf(TEXT(", throttle %.2f rudder %.2f"), Throttle, Rudder) : TEXT(""),
+		bPropulsion ? *(FString::Printf(TEXT(", throttle %.2f rudder %.2f, thrust %.0f N"), Throttle, Rudder, Readout.ThrustN)
+			+ (PropulsionModel == EFluidNinjaPropulsionModel::Propeller
+				? FString::Printf(TEXT(" (gear %d, engine %.0f rpm, prop %.0f rpm, %.1f kW, load %.2f, %.0f%% immersed%s)"), Readout.Gear, Readout.EngineRpm, Readout.PropRpm,
+					Readout.PropPowerKw, Readout.EngineLoad, Readout.PropImmersion * 100.f, Readout.bPropVentilated ? TEXT(", VENTILATED") : TEXT(""))
+				: FString())
+			+ FString::Printf(TEXT(", %.1f m/s through the water, trim %.1f deg"), Readout.SpeedThroughWaterCmS / 100.f, Readout.TrimDeg)
+			+ (IsPlaningHull() ? FString::Printf(TEXT(", wave resistance %.0f N"), Readout.WaveResistanceN) : FString())) : TEXT(""),
+		KeelAreaCm2 > 0.f ? *FString::Printf(TEXT(", drift %.1f deg, keel %.0f N"), Readout.DriftAngleDeg, Readout.KeelForceN) : TEXT(""),
 		// FluidNinja Waves' running estimate of the body's motion (the radiation damping is taken at these frequencies).
 		!WaveMotionHz.IsZero() ? *FString::Printf(TEXT(", moving at %.2f Hz heave, %.2f roll, %.2f pitch"), WaveMotionHz.X, WaveMotionHz.Y, WaveMotionHz.Z) : TEXT(""));
 }

@@ -8,7 +8,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFluidNinjaSwimmerBodyVolumeTest, "FluidNinjaBu
 
 bool FFluidNinjaSwimmerBodyVolumeTest::RunTest(const FString& Parameters)
 {
-	// LF's real 30 cm radius / 172 cm tall humanoid, fully afloat: conserve the configured 50 litres without concentrating it in spheres.
+	// A real game's 30 cm radius / 172 cm tall humanoid, fully afloat: conserve the configured 50 litres without concentrating it in spheres.
 	const FFluidNinjaSwimmerBodyShape Swimming = FFluidNinjaSwimmerBodyShape::Make(30.f, 86.f, -60.0, 0.0, 50.f);
 	TestTrue(TEXT("Full submerged body keeps the authored 50 litres"), FMath::IsNearlyEqual(Swimming.DisplacedLitres, 50.f, 0.001f));
 	TestTrue(TEXT("Freestyle body is shallow"), Swimming.HalfThickness < 8.0);

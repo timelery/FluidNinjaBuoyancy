@@ -851,6 +851,93 @@ namespace FluidNinjaBuoyancy
 		thread_local TArray<FVector4f> RippleScratch;
 		thread_local int32 RippleScratchLast = 0;
 
+		/** A planing hull's pressure distribution for its wave-making resistance: (x and y about the centre of mass, the piece's steady
+		 * vertical load, its spread σ), gathered over the wet pieces of the steps that evaluate it. */
+		thread_local TArray<FVector4f> WaveLoadScratch;
+
+		/** The wave-making resistance is evaluated every WaveResistanceInterval seconds (its loads gathered only on those steps) and
+		 * low-passed over WaveResistanceSmoothSeconds: it changes with the speed and the trim, not from step to step, and a chop must not
+		 * turn into resistance spikes. Every 0.1 s is well inside the low-pass; it was every 1/30 s, three times the cost for nothing. */
+		constexpr float WaveResistanceInterval = 0.1f;
+		constexpr float WaveResistanceSmoothSeconds = 0.25f;
+
+		/** WaveMakingResistance's pressure merged into cells: per cell the summed load, the summed |load| and the |load|-weighted x and
+		 * y, the summed σ² (then σ), and the cell's spread group. */
+		struct FWaveCell
+		{
+			double Load = 0.0;
+			double Weight = 0.0;
+			double X = 0.0;
+			double Y = 0.0;
+			double Spread = 0.0;
+			int32 Group = 0;
+		};
+		thread_local TMap<FIntPoint, int32> WaveCellOf;
+		thread_local TArray<FWaveCell> WaveCells;
+		thread_local TArray<FVector4f> WaveCellLoads;
+		/** Loads under this share of the largest are left out of the wave-making resistance (a hull's sides and transom carry none). */
+		constexpr float WaveLoadSkipShare = 1e-3f;
+		/** The merged cells' spread filter, exp(-k² σ² / 2), is taken once per group of about the same σ: σ rounded to steps of the largest
+		 * σ / (WaveSpreadGroups - 1), so within 1/30 of it. */
+		constexpr int32 WaveSpreadGroups = 16;
+
+		/**
+		 * A wetted transom. In the linear theory the hydrostatic pressure ending at a transom is a step, and a step radiates a wave whose
+		 * resistance, about ½ ρ g T² B (T the transom's draft, B its beam), does not fall with the speed: a floor from the slowest speed the
+		 * hull's pieces resolve, √(g × piece / π) (88 cm/s at 25 cm pieces), upward, so where it began depended on the tessellation. A
+		 * real transom runs wetted below a transom Froude number U / √(g T) of about 2.5: the water closes up behind it and makes no such
+		 * wave. So below TransomWetFroude the wave-making resistance's loads fade in from the trailing edge (the hull's aftmost wet
+		 * vertex along its way through the water) over TransomFadeDrafts × T (T the deepest wet vertex within one hull piece of that
+		 * edge), and between TransomWetFroude and TransomDryFroude the edge sharpens back to the step a dry transom really has. Only
+		 * those loads are faded; the hull's lift and buoyancy are not touched. A 5 m, 800 kg V-bottom runabout (25 cm draft at its
+		 * transom, 25 cm pieces): 380-420 N at 0.9-1.5 m/s before, 1-17 N after; its hump (about 690 N near Fn_L 0.55) kept, and 12.5
+		 * and 25 cm pieces within about 3 % of each other from 3 m/s up, as before.
+		 */
+		constexpr float TransomFadeDrafts = 6.f;
+		constexpr float TransomWetFroude = 2.f;
+		constexpr float TransomDryFroude = 3.f;
+
+		/** Fades the wave-making resistance's loads (x along the motion, about Centre) in from a wetted transom (TransomFadeDrafts):
+		 * Points and PointDepths are the hull's vertices this step (world) and their depths (above 0 wet), Along the motion's direction
+		 * (unit, level), Speed its speed through the water (cm/s), Band one hull piece (cm). */
+		void FadeWettedTransom(TArray<FVector4f>& Loads, TArrayView<const FVector> Points, TArrayView<const float> PointDepths, const FVector& Centre,
+			const FVector& Along, float Speed, float Gravity, float Band)
+		{
+			const int32 NumPoints = FMath::Min(Points.Num(), PointDepths.Num());
+			double Aft = TNumericLimits<double>::Max();
+			for (int32 Index = 0; Index < NumPoints; ++Index)
+			{
+				if (PointDepths[Index] > 0.f)
+				{
+					Aft = FMath::Min(Aft, FVector::DotProduct(Points[Index] - Centre, Along));
+				}
+			}
+			float Draft = 0.f;
+			for (int32 Index = 0; Index < NumPoints; ++Index)
+			{
+				if (PointDepths[Index] > Draft && FVector::DotProduct(Points[Index] - Centre, Along) <= Aft + Band)
+				{
+					Draft = PointDepths[Index];
+				}
+			}
+			if (!(Draft > 0.f) || !(Gravity > 0.f))
+			{
+				return;
+			}
+			const float Sharp = FMath::Clamp((Speed / FMath::Sqrt(Gravity * Draft) - TransomWetFroude) / (TransomDryFroude - TransomWetFroude), 0.f, 1.f);
+			if (Sharp >= 1.f)
+			{
+				return;
+			}
+			const float Edge = static_cast<float>(Aft);
+			const float InverseLength = 1.f / (TransomFadeDrafts * Draft);
+			for (FVector4f& Load : Loads)
+			{
+				const float Weight = FMath::Clamp((Load.X - Edge) * InverseLength, 0.f, 1.f);
+				Load.Z *= Weight + (1.f - Weight) * Sharp;
+			}
+		}
+
 		void TakeRipples(TArray<FVector4f>& Scratch, FStepResult& Out)
 		{
 			RippleScratchLast = Scratch.Num();
@@ -986,9 +1073,276 @@ namespace FluidNinjaBuoyancy
 			Out.SlamPower = static_cast<float>(Power);
 		}
 
-		/** Art-directed damping, propulsion, and the totals: shared by every model. */
-		void FinishStep(const FBodyState& Body, const FWaterView& Water, const FParams& P, float WetFraction, FVector& Force, FVector& Torque,
+		/** Below this the propeller's shaft is taken as stopped (rev/s): the advance ratio is not formed. */
+		constexpr float PropStoppedRevs = 0.05f;
+		/** A disc less than this much under the water (share of its area) ventilates while it is loaded and turning faster than
+		 * PropVentilateRevs; it stays ventilated until it has been PropReattachImmersion under for PropReattachSeconds. */
+		constexpr float PropVentilateImmersion = 0.8f;
+		constexpr float PropVentilateRevs = 5.f;
+		constexpr float PropReattachImmersion = 0.98f;
+		constexpr float PropReattachSeconds = 0.3f;
+		/** The slipping clutch's capacity at the least throttle: the governor's share of the rated torque that holds idle (a crash
+		 * shift with the throttle barely open still turns the propeller round, slowly). */
+		constexpr float ClutchIdleShare = 0.3f;
+
+		/** The open-water table at advance ratio J (forward running), linear between entries and extrapolated past the last. */
+		float PropTable(const float* Values, float Step, float J)
+		{
+			const float T = FMath::Max(J, 0.f) / FMath::Max(Step, 1e-3f);
+			const int32 Index = FMath::Clamp(FMath::FloorToInt32(T), 0, PropTableSize - 2);
+			return Values[Index] + (Values[Index + 1] - Values[Index]) * (T - static_cast<float>(Index));
+		}
+
+		/**
+		 * The propeller model (EPropulsionModel::Propeller), one step. The engine's torque goes through the gearbox to the shaft, which
+		 * the water's torque loads (ρ n² D⁵ KQ); the shaft's speed is stepped semi-implicitly (the load's slope taken implicitly, so a light
+		 * shaft stays stable at any step). The thrust ρ n² D⁴ KT pushes at the disc along its axis (turned with the rudder for an outboard
+		 * or a sterndrive); both scale with the disc's immersion, and drop to the ventilated share when air is drawn down onto the blades.
+		 * The water's torque reacts on the hull about the shaft. Returns the jet's excess speed over the disc (cm/s), the wash the rudder
+		 * gets ahead (none astern: the jet then leaves the rudder).
+		 */
+		float Propel(const FBodyState& Body, const FWaterView& Water, const FParams& P, float DeltaSeconds, FStepState& State, FVector& Force, FVector& Torque,
 			FStepResult& Out)
+		{
+			const FTransform& Transform = Body.Transform;
+			const FVector& Com = Body.CenterOfMass;
+			const FVector Prop = Transform.TransformPosition(P.ThrustLocal);
+			FVector Axis = Transform.TransformVectorNoScale(P.ThrustDirectionLocal.GetSafeNormal());
+			if (P.bSteerableThrust && P.RudderAngle != 0.f)
+			{
+				// Positive rudder turns the bow to +Y: the drive swings its thrust to -Y at the stern.
+				Axis = FQuat(Transform.GetUnitAxis(EAxis::Z), -P.RudderAngle).RotateVector(Axis);
+			}
+			const float Diameter = FMath::Max(P.PropDiameter, 1.f);
+			const float Radius = 0.5f * Diameter;
+
+			// The disc in the water: the share of its area under the surface over its centre (a disc whose axis lies about level).
+			float Height = 0.f;
+			FVector WaterVelocity = FVector::ZeroVector;
+			float Immersion = 0.f;
+			if (Water.Sample(Prop, Height, WaterVelocity))
+			{
+				const float X = FMath::Clamp((Height - static_cast<float>(Prop.Z)) / Radius, -1.f, 1.f);
+				Immersion = (FMath::Acos(-X) + X * FMath::Sqrt(FMath::Max(1.f - X * X, 0.f))) / PI;
+			}
+			const FVector Water2D(WaterVelocity.X * P.FlowCoupling, WaterVelocity.Y * P.FlowCoupling, 0.0);
+			const FVector Relative = Body.Velocity + FVector::CrossProduct(Body.AngularVelocity, Prop - Com) - Water2D;
+			const float Advance = static_cast<float>(FVector::DotProduct(Relative, Axis)) * (1.f - FMath::Clamp(P.PropWakeFraction, 0.f, 0.9f));
+
+			// The command: the throttle's sign picks the gear, its size the engine's throttle, which the engine catches up with.
+			const float Command = FMath::Clamp(P.Throttle, -1.f, 1.f);
+			const int8 Gear = Command > 0.02f ? 1 : Command < -0.02f ? -1 : 0;
+			const int8 PreviousGear = State.Gear;   // read before it is written: the clutch engages on a change
+			State.Gear = Gear;
+			State.EngineThrottle += (FMath::Abs(Command) - State.EngineThrottle) * (1.f - FMath::Exp(-DeltaSeconds / FMath::Max(P.EngineResponseSeconds, 0.01f)));
+			State.EngineThrottle = FMath::Clamp(State.EngineThrottle, 0.f, 1.f);
+
+			// Ventilation: a loaded disc breaking the surface draws air down onto its blades; it holds on until the disc is well under again.
+			if (!State.bVentilated)
+			{
+				if (Gear != 0 && Immersion < PropVentilateImmersion && FMath::Abs(State.ShaftOmega) / (2.f * PI) > PropVentilateRevs)
+				{
+					State.bVentilated = true;
+					State.ImmersedSeconds = 0.f;
+				}
+			}
+			else
+			{
+				State.ImmersedSeconds = Immersion >= PropReattachImmersion ? State.ImmersedSeconds + DeltaSeconds : 0.f;
+				if (State.ImmersedSeconds >= PropReattachSeconds)
+				{
+					State.bVentilated = false;
+				}
+			}
+			const float Wet = Immersion * (State.bVentilated ? FMath::Clamp(P.VentilatedFactor, 0.f, 1.f) : 1.f);
+
+			// KT and KQ at a shaft speed (rad/s, signed): forward running ahead, the same curves at the reverse efficiency astern, the
+			// advance ratio taken in the direction the disc pushes from; against the flow (J below 0) the blades bite harder.
+			const auto Coefficients = [&P, Advance, Diameter](float Omega, float& KT, float& KQ)
+			{
+				const float Revs = FMath::Abs(Omega) / (2.f * PI);
+				const bool bAstern = Omega < 0.f;
+				const float Into = bAstern ? -Advance : Advance;
+				const float J = Revs > PropStoppedRevs ? FMath::Clamp(Into / (Revs * Diameter), -2.f, 3.f * P.PropTableStep * (PropTableSize - 1)) : 0.f;
+				KT = PropTable(P.PropKT, P.PropTableStep, J);
+				KQ = PropTable(P.PropKQ, P.PropTableStep, J);
+				if (J < 0.f)
+				{
+					const float Bite = 1.f + 0.5f * FMath::Min(-J, 1.f);
+					KT = P.PropKT[0] * Bite;
+					KQ = P.PropKQ[0] * Bite;
+				}
+				if (bAstern)
+				{
+					const float Reverse = FMath::Clamp(P.ReverseEfficiency, 0.f, 1.f);
+					KT *= Reverse;
+					KQ *= Reverse;
+				}
+			};
+			// The torque the water takes from the shaft (signed like Omega) and the thrust it gives (along Axis, negative astern).
+			const float D4 = Diameter * Diameter * Diameter * Diameter;
+			const auto WaterTorque = [&](float Omega)
+			{
+				float KT = 0.f;
+				float KQ = 0.f;
+				Coefficients(Omega, KT, KQ);
+				const float Revs = Omega / (2.f * PI);
+				return P.Rho * Revs * FMath::Abs(Revs) * D4 * Diameter * KQ * Wet;
+			};
+
+			// The engine: the throttle's share of a torque curve that peaks low and gives the rated power at the rev limit, a governor
+			// holding idle, its own friction, and the rev limiter (no torque from 4 % over the limit).
+			const float RatedOmega = FMath::Max(P.EngineMaxRpm, 100.f) * (2.f * PI / 60.f);
+			const float IdleOmega = FMath::Clamp(P.EngineIdleRpm, 0.f, 0.9f * P.EngineMaxRpm) * (2.f * PI / 60.f);
+			const float RatedTorque = FMath::Max(P.EnginePower, 0.f) / RatedOmega;
+			const auto EngineTorque = [&](float Omega)
+			{
+				const float Rate = FMath::Max(Omega, 0.f) / RatedOmega;
+				float Engine = State.EngineThrottle * RatedTorque * (1.25f - 0.25f * Rate * Rate) * FMath::Clamp((1.04f - Rate) / 0.04f, 0.f, 1.f);
+				Engine += RatedTorque * 0.3f * FMath::Clamp((IdleOmega - Omega) / FMath::Max(0.2f * IdleOmega, 1.f), 0.f, 1.f);
+				return Engine - RatedTorque * 0.04f * Rate;
+			};
+			// What the engine could give at a speed at full throttle: the clutch's capacity while it slips, and the load's reference.
+			const auto FullThrottleTorque = [&](float Speed)
+			{
+				const float Rate = FMath::Max(Speed, 0.f) / RatedOmega;
+				return RatedTorque * FMath::Max(1.25f - 0.25f * Rate * Rate, 0.2f);
+			};
+			const float Ratio = FMath::Max(P.GearRatio, 0.1f);
+			const float Efficiency = FMath::Clamp(P.GearEfficiency, 0.1f, 1.f);
+			// The clutch. In gear the engine (I_e, kg·cm², turning one way only) is locked to the shaft through the gear: it turns at
+			// G ω R (G the gear's sign, ω the shaft's speed, R the ratio) and adds I_e R² to the shaft's inertia. Going into gear while the
+			// shaft stands still or already turns the gear's way, the two lock at once sharing their angular momentum (about the shaft, the
+			// engine's I_e R² at G ω_e / R): ω = (I_e R G ω_e + I_p ω) / (I_e R² + I_p). Setting the engine to the shaft's speed instead
+			// dropped it to about 0 rpm on every engagement from rest. Going into gear while the shaft still turns against it (a crash
+			// reverse, or reverse put in with the propeller windmilling ahead), or when the water drives a locked shaft backwards, the
+			// engine cannot follow it below 0: the clutch slips. It passes at most what the engine could give at its own speed at the
+			// throttle it has reached (its full-throttle torque times that throttle, never less than the governor's idle share, so a light
+			// touch astern at speed does not kick like full reverse) through the gear to the propeller alone (I_p), and loads the engine
+			// with it: the engine keeps its own
+			// speed, bogging where the throttle gives less than that, the governor keeping it at idle at least, while the propeller is
+			// turned against the water, through 0, until it meets the engine's speed G ω_e / R; there the two lock. Under a heavy load at
+			// full throttle (a crash reverse at speed) the propeller can stay slower than the engine for a second or more, the engine
+			// sagging slowly, until the boat has slowed. Snapping the engine to the shaft read 0 rpm for about 0.4 s there while the
+			// engine's full low-speed torque drove the propeller astern.
+			const float Sense = static_cast<float>(Gear);
+			const bool bAgainst = Gear != 0 && (Gear != PreviousGear ? Sense * State.ShaftOmega < 0.f : State.bClutchSlipping);
+			const bool bSlipping = bAgainst && Sense * State.ShaftOmega < State.EngineOmega / Ratio;
+			const float SlipLoad = bSlipping ? FullThrottleTorque(State.EngineOmega) * FMath::Clamp(State.EngineThrottle, ClutchIdleShare, 1.f) : 0.f;   // at the engine
+			const float SlipDrive = Sense * SlipLoad * Ratio * Efficiency;                     // at the shaft
+			// The shaft's net torque at Omega: the engine through the gear (in gear; while the clutch slips, what it passes) less the water's.
+			const auto Net = [&](float Omega)
+			{
+				const float Drive = bSlipping ? SlipDrive : Gear != 0 ? Sense * EngineTorque(Sense * Omega * Ratio) * Ratio * Efficiency : 0.f;
+				return Drive - WaterTorque(Omega);
+			};
+			const float LockedInertia = FMath::Max(P.EngineInertia * Ratio * Ratio + P.PropInertia, 1.f);
+			const float Inertia = Gear != 0 && !bSlipping ? LockedInertia : FMath::Max(P.PropInertia, 1.f);
+			// The shaft's speed once the engine (at EngineSpeed) and the propeller (at ShaftSpeed) lock in this gear.
+			const auto LockedSpeed = [&P, Ratio, Sense, LockedInertia](float EngineSpeed, float ShaftSpeed)
+			{
+				return (P.EngineInertia * Ratio * Sense * EngineSpeed + P.PropInertia * ShaftSpeed) / LockedInertia;
+			};
+			float Omega = State.ShaftOmega;
+			if (Gear != 0 && !bSlipping && (Gear != PreviousGear || State.bClutchSlipping))
+			{
+				Omega = LockedSpeed(State.EngineOmega, Omega);
+			}
+			if (DeltaSeconds > 0.f)
+			{
+				const float Probe = FMath::Max(1.f, 0.01f * FMath::Abs(Omega));
+				const float Slope = (Net(Omega + Probe) - Net(Omega - Probe)) / (2.f * Probe);   // negative where the shaft settles
+				Omega += DeltaSeconds * Net(Omega) / (Inertia + DeltaSeconds * FMath::Max(-Slope, 0.f));
+				if (!FMath::IsFinite(Omega))
+				{
+					Omega = 0.f;
+				}
+				if (bSlipping)
+				{
+					// The engine, loaded by what the clutch passes (semi-implicit, as the shaft).
+					const auto EngineNet = [&](float Speed)
+					{
+						return EngineTorque(Speed) - SlipLoad;
+					};
+					const float EngineProbe = FMath::Max(1.f, 0.01f * State.EngineOmega);
+					const float EngineSlope = (EngineNet(State.EngineOmega + EngineProbe) - EngineNet(State.EngineOmega - EngineProbe)) / (2.f * EngineProbe);
+					State.EngineOmega += DeltaSeconds * EngineNet(State.EngineOmega)
+						/ (FMath::Max(P.EngineInertia, 1.f) + DeltaSeconds * FMath::Max(-EngineSlope, 0.f));
+					State.EngineOmega = FMath::IsFinite(State.EngineOmega) ? FMath::Max(State.EngineOmega, IdleOmega) : IdleOmega;
+				}
+			}
+			// The slip ends where the speeds meet: the two lock sharing their angular momentum (little is left to share by then).
+			const bool bMet = bSlipping && Sense * Omega >= State.EngineOmega / Ratio;
+			if (bMet)
+			{
+				Omega = LockedSpeed(State.EngineOmega, Omega);
+			}
+			if (Gear != 0 && (bSlipping ? bMet : Sense * Omega >= 0.f))
+			{
+				State.EngineOmega = Sense * Omega * Ratio;
+				State.bClutchSlipping = false;
+			}
+			else if (bSlipping)
+			{
+				State.bClutchSlipping = true;   // the engine went its own way above
+			}
+			else
+			{
+				// Neutral (or a locked shaft the water drove backwards, which slips from the next step): the engine revs to the throttle,
+				// free of the shaft.
+				const float Target = IdleOmega + State.EngineThrottle * (RatedOmega - IdleOmega);
+				State.EngineOmega += (Target - State.EngineOmega) * (1.f - FMath::Exp(-DeltaSeconds / 0.3f));
+				State.bClutchSlipping = Gear != 0;
+			}
+			State.ShaftOmega = Omega;
+
+			float KT = 0.f;
+			float KQ = 0.f;
+			Coefficients(Omega, KT, KQ);
+			const float Revs = Omega / (2.f * PI);
+			const float Thrust = P.Rho * Revs * FMath::Abs(Revs) * D4 * KT * Wet;
+			const float ShaftTorque = WaterTorque(Omega);
+			if (Thrust != 0.f)
+			{
+				Force += Axis * Thrust;
+				Torque += FVector::CrossProduct(Prop - Com, Axis * Thrust);
+			}
+			// The water's torque on the blades reacts on the hull about the shaft: a right-handed propeller going ahead (clockwise from
+			// astern) lists the boat to port.
+			Torque += Axis * (FMath::Sign(P.PropHand) * ShaftTorque);
+			Out.ThrustApplied = Thrust;
+
+			// The slipstream (actuator disc): T = ½ ρ A (Vj² - Va²) over the wet part of the disc.
+			const float DiscArea = 0.25f * PI * Diameter * Diameter * FMath::Max(Immersion, 0.1f);
+			const float Jet = FMath::Sqrt(FMath::Max(Advance * Advance + 2.f * FMath::Abs(Thrust) / (P.Rho * DiscArea), 0.f));
+			// What the engine could give at this rpm at full throttle (the load is the share of it the water takes).
+			const float Available = FMath::Max(FullThrottleTorque(State.EngineOmega), 1e-3f);
+
+			FPropulsorResult& Result = Out.Propulsor;
+			Result.bActive = true;
+			Result.Thrust = Thrust;
+			Result.ShaftTorque = ShaftTorque;
+			Result.ShaftRpm = Omega * (60.f / (2.f * PI));
+			Result.EngineRpm = State.EngineOmega * (60.f / (2.f * PI));
+			Result.Power = ShaftTorque * Omega;
+			Result.Immersion = Immersion;
+			Result.JetSpeed = Jet;
+			Result.AdvanceSpeed = Advance;
+			Result.Load = Gear != 0 ? FMath::Clamp(FMath::Abs(ShaftTorque) / (Ratio * Efficiency * Available), 0.f, 1.5f) : 0.f;
+			Result.Gear = Gear;
+			Result.bVentilated = State.bVentilated;
+			Result.Location = Prop;
+			Result.Axis = Axis;
+			return Gear > 0 && Thrust > 0.f ? FMath::Max(Jet - FMath::Max(Advance, 0.f), 0.f) * Immersion : 0.f;
+		}
+
+		/** A boat's drift angle (FStepResult::DriftAngleDeg) is read only at least this fast through the water (cm/s): slower, the
+		 * heading and the way through the water barely relate (a boat idling in a current). */
+		constexpr float DriftMinSpeed = 50.f;
+
+		/** Art-directed damping, propulsion, the keel, and the totals: shared by every model. */
+		void FinishStep(const FBodyState& Body, const FWaterView& Water, const FParams& P, float DeltaSeconds, float WetFraction, FStepState& State, FVector& Force,
+			FVector& Torque, FStepResult& Out)
 		{
 			const FTransform& Transform = Body.Transform;
 			const FVector& Com = Body.CenterOfMass;
@@ -1008,17 +1362,37 @@ namespace FluidNinjaBuoyancy
 			}
 
 			// Propulsion: the propeller pushes only while it is in the water; the rudder lifts with the water flowing past it (the
-			// boat's own speed plus the propeller's wash).
+			// boat's own speed plus the propeller's wash behind a fixed propeller; the boat's own speed alone on a steerable drive).
 			if (P.bPropulsion)
 			{
+				const double ForceZBefore = Force.Z;
 				float Height = 0.f;
 				FVector WaterVelocity;
-				const FVector Prop = Transform.TransformPosition(P.ThrustLocal);
-				if (P.Throttle != 0.f && P.MaxThrust > 0.f && Water.Sample(Prop, Height, WaterVelocity) && Height > Prop.Z)
+				float RudderWash = P.Throttle * P.PropWashSpeed;
+				if (P.PropulsionModel == EPropulsionModel::Propeller)
 				{
-					const FVector Direction = Transform.TransformVectorNoScale(P.ThrustDirectionLocal.GetSafeNormal());
-					Out.ThrustApplied = P.Throttle * P.MaxThrust;
-					Apply(Direction * Out.ThrustApplied, Prop);
+					RudderWash = Propel(Body, Water, P, DeltaSeconds, State, Force, Torque, Out);
+				}
+				else
+				{
+					const FVector Prop = Transform.TransformPosition(P.ThrustLocal);
+					if (P.Throttle != 0.f && P.MaxThrust > 0.f && Water.Sample(Prop, Height, WaterVelocity) && Height > Prop.Z)
+					{
+						FVector Direction = Transform.TransformVectorNoScale(P.ThrustDirectionLocal.GetSafeNormal());
+						if (P.bSteerableThrust && P.RudderAngle != 0.f)
+						{
+							Direction = FQuat(Transform.GetUnitAxis(EAxis::Z), -P.RudderAngle).RotateVector(Direction);   // an outboard swings its thrust
+						}
+						Out.ThrustApplied = P.Throttle * P.MaxThrust;
+						Apply(Direction * Out.ThrustApplied, Prop);
+					}
+				}
+				if (P.bSteerableThrust)
+				{
+					// An outboard's or a sterndrive's lower unit turns with its own propeller, so its jet meets it at no incidence: the jet's
+					// side force is the swung thrust's T sin δ, already applied. The rudder (the lower unit's skeg) lifts on the boat's own
+					// flow alone; adding the jet to it as well gave about three times the side force at low speed.
+					RudderWash = 0.f;
 				}
 				const FVector Rudder = Transform.TransformPosition(P.RudderLocal);
 				if (P.RudderArea > 0.f && P.RudderAngle != 0.f && Water.Sample(Rudder, Height, WaterVelocity) && Height > Rudder.Z)
@@ -1027,9 +1401,72 @@ namespace FluidNinjaBuoyancy
 					const FVector Right = Transform.GetUnitAxis(EAxis::Y);
 					const FVector Water2D(WaterVelocity.X * P.FlowCoupling, WaterVelocity.Y * P.FlowCoupling, 0.0);
 					const FVector Relative = V + FVector::CrossProduct(W, Rudder - Com) - Water2D;
-					const float U = static_cast<float>(FVector::DotProduct(Relative, Forward)) + P.Throttle * P.PropWashSpeed;
+					const float U = static_cast<float>(FVector::DotProduct(Relative, Forward)) + RudderWash;
 					const float Cl = FMath::Clamp(2.f * PI * P.RudderAngle, -1.2f, 1.2f);
 					Apply(-Right * (0.5f * P.Rho * P.RudderArea * Cl * U * FMath::Abs(U)), Rudder);
+				}
+				Out.PropulsionForceZ = static_cast<float>(Force.Z - ForceZBefore);
+			}
+
+			// A boat's drift: its heading (level) against its way through the water at the centre of mass, for the readout.
+			if (WetFraction > 0.f && (P.bPropulsion || P.KeelArea > 0.f))
+			{
+				float DriftHeight = 0.f;
+				FVector DriftWater;
+				if (Water.Sample(Com, DriftHeight, DriftWater))
+				{
+					const FVector Heading = Transform.GetUnitAxis(EAxis::X).GetSafeNormal2D();
+					const FVector Way(V.X - DriftWater.X * P.FlowCoupling, V.Y - DriftWater.Y * P.FlowCoupling, 0.0);
+					if (!Heading.IsZero() && Way.SizeSquared() >= FMath::Square(static_cast<double>(DriftMinSpeed)))
+					{
+						const double Drift = FMath::RadiansToDegrees(FMath::Atan2(FVector::CrossProduct(Heading, Way).Z, FVector::DotProduct(Heading, Way)));
+						Out.DriftAngleDeg = FMath::IsFinite(Drift) ? static_cast<float>(Drift) : 0.f;
+					}
+				}
+			}
+
+			// The keel: the hull's lateral plane under the water (keel, skeg, pump housing, strakes), taken as a low-aspect-ratio wing at
+			// the centre of lateral resistance. With the water moving past it at u along the hull and v across it (the body's velocity
+			// there less the current, as at the rudder), it pushes back against the slide with the slender-body lift (π AR / 2) |u| v plus
+			// the crossflow drag Cd v |v|, and the slide costs the induced drag (π AR / 4) v² against the way ahead, each times ½ρ × its
+			// area × the share of its span under the water (AR = 2 × span² / area: the hull above mirrors it). A planing V-bottom's own
+			// grip against the slide goes with sin² of its deadrise (about a tenth of the dynamic pressure at 18°), and the rudder's force
+			// follows only its angle, not the slide: without a keel a planing hull skated outward through its turns. Any hull model and
+			// flow, with or without propulsion.
+			if (P.KeelArea > 0.f)
+			{
+				const FVector KeelPoint = Transform.TransformPosition(P.KeelLocal);
+				float KeelHeight = 0.f;
+				FVector KeelWater;
+				if (Water.Sample(KeelPoint, KeelHeight, KeelWater))
+				{
+					const float Span = FMath::Max(P.KeelDepth, 1.f);
+					const float KeelBottom = static_cast<float>(KeelPoint.Z) - 0.5f * Span;
+					const float Immersion = FMath::Clamp((KeelHeight - KeelBottom) / Span, 0.f, 1.f);
+					if (Immersion > 0.f)
+					{
+						const FVector Forward = Transform.GetUnitAxis(EAxis::X);
+						const FVector Right = Transform.GetUnitAxis(EAxis::Y);
+						const FVector Water2D(KeelWater.X * P.FlowCoupling, KeelWater.Y * P.FlowCoupling, 0.0);
+						const FVector Relative = V + FVector::CrossProduct(W, KeelPoint - Com) - Water2D;
+						const float U = static_cast<float>(FVector::DotProduct(Relative, Forward));
+						const float Slide = static_cast<float>(FVector::DotProduct(Relative, Right));
+						const float AspectRatio = 2.f * Span * Span / P.KeelArea;
+						const float HalfRhoArea = 0.5f * P.Rho * P.KeelArea * Immersion;
+						const float LiftSlope = 0.5f * PI * AspectRatio * FMath::Abs(U);   // the lift per cm/s of slide
+						const float Cd = FMath::Max(P.KeelCrossflow, 0.f);
+						const float SideForce = -HalfRhoArea * (LiftSlope * Slide + Cd * Slide * FMath::Abs(Slide));
+						const float InducedDrag = -HalfRhoArea * 0.25f * PI * AspectRatio * Slide * Slide * FMath::Sign(U);
+						if (FMath::IsFinite(SideForce) && FMath::IsFinite(InducedDrag))
+						{
+							const FVector KeelPush = Right * SideForce + Forward * InducedDrag;
+							Apply(KeelPush, KeelPoint);
+							Out.PropulsionForceZ += static_cast<float>(KeelPush.Z);   // a banked keel's push tilts; it makes no ripple pieces
+							Out.KeelForce = FMath::Abs(SideForce);
+							// Stable steps: the side force gains this much per cm/s of slide, so a light body with a big keel stays stable.
+							AddDragDamping(Out, HalfRhoArea * (LiftSlope + 2.f * Cd * FMath::Abs(Slide)), KeelPoint - Com, Right);
+						}
+					}
 				}
 			}
 
@@ -1289,7 +1726,7 @@ namespace FluidNinjaBuoyancy
 			{
 				TakeRipples(*Ripples, Out);
 			}
-			FinishStep(Body, Water, P, FMath::Min(1.f, 2.f * WettedArea / FMath::Max(SurfaceArea, 1.f)), Force, Torque, Out);
+			FinishStep(Body, Water, P, DeltaSeconds, FMath::Min(1.f, 2.f * WettedArea / FMath::Max(SurfaceArea, 1.f)), State, Force, Torque, Out);
 		}
 
 		/** An entry: the first step the body touches the water after a step it didn't, driving down into it at least PointSlamMinSpeed.
@@ -1326,8 +1763,10 @@ namespace FluidNinjaBuoyancy
 		TRACE_CPUPROFILER_EVENT_SCOPE(FluidNinjaBuoyancy::Integrate);
 		Out.Force = Out.Torque = Out.AngularDampingRate = Out.BuoyancyForce = Out.AirForce = FVector::ZeroVector;
 		Out.BuoyancyCentre = Body.CenterOfMass;
-		Out.DisplacedVolume = Out.WettedArea = Out.SlamPower = Out.EntryPower = Out.ThrustApplied = 0.f;
-		Out.SlamLocation = FVector::ZeroVector;
+		Out.DisplacedVolume = Out.WettedArea = Out.SlamPower = Out.EntryPower = Out.ThrustApplied = Out.PropulsionForceZ = 0.f;
+		Out.KeelForce = Out.DriftAngleDeg = 0.f;
+		Out.SlamLocation = Out.WaveResistance = FVector::ZeroVector;
+		Out.Propulsor = FPropulsorResult();
 		Out.bTouchesWater = false;
 		Out.HeaveStiffness = 0.f;
 		Out.TiltStiffness = Out.DragDamping = Out.SpinDamping = FVector::ZeroVector;
@@ -1452,6 +1891,16 @@ namespace FluidNinjaBuoyancy
 		// times cheaper than the general power.
 		const bool bPressureSqrt = P.PressureFalloff == 0.5f;
 		const bool bSuctionSqrt = P.SuctionFalloff == 0.5f;
+		// A planing hull (EHullFlow::Planing): the planing law on the faces meeting the flow, a ventilated transom, slams on the vertical entry
+		// speed alone, the steady pressure apart for the waves, and its pressure distribution kept for the wave-making resistance.
+		const bool bPlaning = P.HullFlow == EHullFlow::Planing;
+		const bool bSplitSteady = bPlaning && P.bSplitSteadyImpulses && Ripples;
+		const float PlaningHalfRhoK = 0.5f * P.Rho * FMath::Max(P.PlaningPressureCoefficient, 0.f);
+		const bool bWaveResistance = bPlaning && P.WaveResistanceScale > 0.f && DeltaSeconds > 0.f;
+		// The wave-making resistance is evaluated every WaveResistanceInterval: its pressure is gathered only on the steps that evaluate it.
+		const bool bWaveLoads = bWaveResistance && State.WaveResistanceSeconds >= WaveResistanceInterval - DeltaSeconds;
+		TArray<FVector4f>& Loads = WaveLoadScratch;
+		Loads.Reset();
 		for (int32 TriIndex = 0; TriIndex < NumTriangles; ++TriIndex)
 		{
 			const FIntVector3& Tri = Hull.Triangles[TriIndex];
@@ -1551,13 +2000,16 @@ namespace FluidNinjaBuoyancy
 				}
 			}
 
-			// Ripples: each wet piece's centre, area and the normal (pressure drag or suction) force on it, kept until the slam is known.
+			// Ripples: each wet piece's centre, area and the normal (pressure drag or suction) force on it, kept until the slam is known; on a
+			// planing hull also the share of that force its horizontal motion drives (its steady part).
 			double RippleX[2] = {};
 			double RippleY[2] = {};
 			float RippleArea[2] = {};
 			float RippleForceZ[2] = {};
+			float RippleSteadyZ[2] = {};
 			float RippleDepth[2] = {};
 			int32 NumRipplePieces = 0;
+			const float FacingUp = FMath::Abs(static_cast<float>(Normal.Z));   // the share of a piece seen from above
 
 			float Wet = 0.f;
 			for (int32 Sub = 0; Sub < NumSub; ++Sub)
@@ -1596,11 +2048,27 @@ namespace FluidNinjaBuoyancy
 				const float Speed = static_cast<float>(Relative.Size());
 				const float DragScale = ReferencePressure * SubArea * InverseReference;
 				float NormalForceZ = 0.f;   // the pressure drag or suction on the body, upward (ripples)
+				float SteadyShare = 0.f;    // the share of it the piece's horizontal motion through the water drives (planing)
 				if (Speed > 1.f)
 				{
-					const float Cos = static_cast<float>(FVector::DotProduct(Normal, Relative)) / Speed;
+					const float NormalSpeed = static_cast<float>(FVector::DotProduct(Normal, Relative));
+					const float Cos = NormalSpeed / Speed;
 					const float S = Speed * InverseReference;
-					if (Cos > 0.f)
+					if (bPlaning && FMath::Abs(NormalSpeed) > 1e-3f)
+					{
+						SteadyShare = FMath::Clamp(static_cast<float>(Normal.X * Relative.X + Normal.Y * Relative.Y) / NormalSpeed, 0.f, 1.f);
+					}
+					if (Cos > 0.f && bPlaning)
+					{
+						// Savitsky's planing law: the dynamic pressure k ½ρ V² on a face, scaled by its incidence cos θ (sin τ on a bottom at
+						// trim τ), so a flat bottom lifts with its trim and a face meeting the flow head-on stagnates at k of it. Its slope
+						// along the normal, k ½ρ A V (1 + cos² θ), is the drag's derivative for stable steps.
+						const FVector NormalForce = -Normal * (PlaningHalfRhoK * SubArea * Speed * Speed * Cos);
+						Apply(NormalForce, SubCentre);
+						NormalForceZ = static_cast<float>(NormalForce.Z);
+						AddDragDamping(Out, PlaningHalfRhoK * SubArea * Speed * (1.f + Cos * Cos), Arm, Normal);
+					}
+					else if (Cos > 0.f)
 					{
 						const float Falloff = bPressureSqrt ? FMath::Sqrt(Cos) : FMath::Pow(Cos, P.PressureFalloff);
 						const FVector NormalForce = -Normal * (ReferencePressure * SubArea * (P.PressureDragLinear * S + P.PressureDragQuadratic * S * S) * Falloff);
@@ -1611,10 +2079,23 @@ namespace FluidNinjaBuoyancy
 					else
 					{
 						const float Falloff = bSuctionSqrt ? FMath::Sqrt(-Cos) : FMath::Pow(-Cos, P.SuctionFalloff);
-						const FVector NormalForce = Normal * (ReferencePressure * SubArea * (P.SuctionDragLinear * S + P.SuctionDragQuadratic * S * S) * Falloff);
+						float Suction = ReferencePressure * (P.SuctionDragLinear * S + P.SuctionDragQuadratic * S * S) * Falloff;
+						// A planing hull's stern: the pressure behind a face pulling away cannot fall below the air's, so the suction is at most
+						// the hydrostatic head over the piece; past it the water lets go of the face (a ventilated transom) and the drag no
+						// longer grows with the speed.
+						const float Ventilated = P.Rho * P.Gravity * FMath::Max(SubDepth, 0.f);
+						const bool bVentilatedFace = bPlaning && Suction > Ventilated;
+						if (bVentilatedFace)
+						{
+							Suction = Ventilated;
+						}
+						const FVector NormalForce = Normal * (Suction * SubArea);
 						Apply(NormalForce, SubCentre);
 						NormalForceZ = static_cast<float>(NormalForce.Z);
-						AddDragDamping(Out, DragScale * (P.SuctionDragLinear + 2.f * P.SuctionDragQuadratic * S) * Falloff, Arm, Normal);
+						if (!bVentilatedFace)
+						{
+							AddDragDamping(Out, DragScale * (P.SuctionDragLinear + 2.f * P.SuctionDragQuadratic * S) * Falloff, Arm, Normal);
+						}
 					}
 					if (Cf > 0.f)
 					{
@@ -1638,8 +2119,16 @@ namespace FluidNinjaBuoyancy
 					RippleY[NumRipplePieces] = SubCentre.Y;
 					RippleArea[NumRipplePieces] = SubArea;
 					RippleForceZ[NumRipplePieces] = NormalForceZ;
+					RippleSteadyZ[NumRipplePieces] = NormalForceZ * SteadyShare;
 					RippleDepth[NumRipplePieces] = SubDepth;
 					++NumRipplePieces;
+				}
+				// The wave-making resistance's pressure: the piece's hydrostatic lift and the steady part of its dynamic push, about the centre
+				// of mass, spread over the disc of its area seen from above (a disc of radius r filters waves as a Gaussian of σ = r / 2).
+				if (bWaveLoads)
+				{
+					Loads.Add(FVector4f(static_cast<float>(SubCentre.X - Com.X), static_cast<float>(SubCentre.Y - Com.Y),
+						static_cast<float>(Lift.Z) + NormalForceZ * SteadyShare, 0.5f * FMath::Sqrt(FMath::Max(SubArea * FacingUp, 1.f) / PI)));
 				}
 			}
 			WettedArea += Wet;
@@ -1655,7 +2144,9 @@ namespace FluidNinjaBuoyancy
 			if (bPrimed && P.SlamMultiplier > 0.f && DeltaSeconds > 0.f && Wet > Previous)
 			{
 				const FVector Relative = V + FVector::CrossProduct(W, Centre - Com) - WaterVelocity;
-				const float Vn = static_cast<float>(FVector::DotProduct(Relative, Normal));
+				// A planing hull slams on its vertical entry speed alone: the forward speed's push on a bottom re-wetting in chop is the
+				// planing law's, which a slam on the whole inward speed would count again.
+				const float Vn = bPlaning ? static_cast<float>(Relative.Z * Normal.Z) : static_cast<float>(FVector::DotProduct(Relative, Normal));
 				if (Vn >= PointSlamMinSpeed)
 				{
 					FSlamPiece& Piece = Slams.AddDefaulted_GetRef();
@@ -1687,11 +2178,25 @@ namespace FluidNinjaBuoyancy
 			{
 				for (int32 RippleIndex = 0; RippleIndex < NumRipplePieces; ++RippleIndex)
 				{
-					const float PieceForceZ = RippleForceZ[RippleIndex] * RippleReach(RippleDepth[RippleIndex], RippleScale);
-					if (PieceForceZ != 0.f)
+					const float Reach = RippleReach(RippleDepth[RippleIndex], RippleScale);
+					const float PieceForceZ = RippleForceZ[RippleIndex] * Reach;
+					if (PieceForceZ == 0.f)
 					{
-						Ripples->Add(FVector4f(static_cast<float>(RippleX[RippleIndex]), static_cast<float>(RippleY[RippleIndex]), PieceForceZ * DeltaSeconds,
-							RippleArea[RippleIndex] * FromAbove));
+						continue;
+					}
+					const float X = static_cast<float>(RippleX[RippleIndex]);
+					const float Y = static_cast<float>(RippleY[RippleIndex]);
+					const float PieceArea = RippleArea[RippleIndex] * FromAbove;
+					// Planing: the steady part (its horizontal motion's) as a piece of its own, marked by a negative area; the rest as usual.
+					const float SteadyZ = bSplitSteady ? RippleSteadyZ[RippleIndex] * Reach : 0.f;
+					if (SteadyZ != 0.f)
+					{
+						Ripples->Add(FVector4f(X, Y, SteadyZ * DeltaSeconds, -FMath::Max(PieceArea, 1e-3f)));
+					}
+					const float TransientZ = PieceForceZ - SteadyZ;
+					if (TransientZ != 0.f)
+					{
+						Ripples->Add(FVector4f(X, Y, TransientZ * DeltaSeconds, PieceArea));
 					}
 				}
 			}
@@ -1730,7 +2235,55 @@ namespace FluidNinjaBuoyancy
 		{
 			TakeRipples(*Ripples, Out);
 		}
-		FinishStep(Body, Water, P, FMath::Min(1.f, 2.f * WettedArea / FMath::Max(Hull.TotalArea, 1.f)), Force, Torque, Out);
+		// A planing hull's wave-making resistance (Havelock), against its way through the water at its centre of buoyancy.
+		if (bWaveResistance && WettedArea > 0.f)
+		{
+			float Height = 0.f;
+			FVector WaterVelocity = FVector::ZeroVector;
+			FVector Through = V;
+			if (Water.Sample(Com, Height, WaterVelocity))
+			{
+				Through -= FVector(WaterVelocity.X * P.FlowCoupling, WaterVelocity.Y * P.FlowCoupling, 0.0);
+			}
+			Through.Z = 0.0;
+			if (bWaveLoads)
+			{
+				State.WaveResistanceSeconds = 0.f;
+				const double U = Through.Size();
+				FVector Raw = FVector::ZeroVector;
+				if (U > 1.0)
+				{
+					// The loads in the frame of the motion: x along it, y across it.
+					const FVector Along = Through / U;
+					for (FVector4f& Load : Loads)
+					{
+						const float AlongX = static_cast<float>(Load.X * Along.X + Load.Y * Along.Y);
+						const float Across = static_cast<float>(-Load.X * Along.Y + Load.Y * Along.X);
+						Load.X = AlongX;
+						Load.Y = Across;
+					}
+					const float Piece = FMath::Max(P.HullPieceCm, 2.f);
+					FadeWettedTransom(Loads, WorldPoints, Depths, Com, Along, static_cast<float>(U), P.Gravity, Piece);
+					const float Resistance = WaveMakingResistance(Loads, static_cast<float>(U), P.Rho, P.Gravity, P.WaterDepth, PI / Piece);
+					Raw = -Along * (static_cast<double>(Resistance) * P.WaveResistanceScale);
+				}
+				State.WaveResistanceRaw = Raw;
+			}
+			else
+			{
+				State.WaveResistanceSeconds += DeltaSeconds;
+			}
+			const float Smooth = 1.f - FMath::Exp(-DeltaSeconds / WaveResistanceSmoothSeconds);
+			State.WaveResistance += (State.WaveResistanceRaw - State.WaveResistance) * Smooth;
+			Apply(State.WaveResistance, Out.BuoyancyCentre);
+			Out.WaveResistance = State.WaveResistance;
+		}
+		else
+		{
+			State.WaveResistance = State.WaveResistanceRaw = FVector::ZeroVector;
+			State.WaveResistanceSeconds = TNumericLimits<float>::Max();   // the next wet step evaluates at once
+		}
+		FinishStep(Body, Water, P, DeltaSeconds, FMath::Min(1.f, 2.f * WettedArea / FMath::Max(Hull.TotalArea, 1.f)), State, Force, Torque, Out);
 		NoteEntry(FinestHull, Body, State, Out);
 	}
 
@@ -1872,6 +2425,7 @@ namespace FluidNinjaBuoyancy
 			FParams Static = Params;
 			Static.SlamMultiplier = 0.f;
 			Static.bPropulsion = false;
+			Static.KeelArea = 0.f;
 			Static.AirDragCoefficient = 0.f;
 			Static.BuoyancyMultiplier = 1.f;
 			return Static;
@@ -1962,5 +2516,183 @@ namespace FluidNinjaBuoyancy
 		Integrate(Hull, Body, Flat, StaticParams(Params), 0.f, State, Out);
 		const double Righting = -(Axis == 0 ? Out.Torque.X : Out.Torque.Y);
 		return static_cast<float>(Righting / (MassKg * Params.Gravity * FMath::Sin(Heel)));
+	}
+
+	void FillPropellerSeries(float PitchRatio, FParams& Out)
+	{
+		const float Pitch = FMath::Clamp(PitchRatio, 0.4f, 2.f);
+		const float J0 = 1.08f * Pitch;
+		const float KT0 = 0.45f * FMath::Pow(Pitch, 1.2f);
+		const float KQ0 = 0.062f * FMath::Pow(Pitch, 1.7f);
+		Out.PropTableStep = 1.5f * J0 / static_cast<float>(PropTableSize - 1);
+		for (int32 Index = 0; Index < PropTableSize; ++Index)
+		{
+			const float Share = FMath::Pow(Index * Out.PropTableStep / J0, 1.6f);
+			Out.PropKT[Index] = KT0 * (1.f - Share);
+			Out.PropKQ[Index] = KQ0 * (1.f - 0.76f * Share);
+		}
+	}
+
+	float WaveMakingResistance(TArrayView<const FVector4f> Loads, float U, float Rho, float Gravity, float Depth, float KMax)
+	{
+		if (Loads.IsEmpty() || !(U > 1.f) || !(KMax > 0.f) || !(Rho > 0.f) || !(Gravity > 0.f))
+		{
+			return 0.f;
+		}
+		// The waves that keep station with the pressure run at k0 sec²θ in deep water (k0 = g / U²); none shorter than the pressure can make
+		// (KMax), so θ is sampled in tan θ (sec²θ = 1 + tan²θ) out to where k0 sec²θ reaches KMax, by Simpson's rule.
+		const double K0 = Gravity / (static_cast<double>(U) * U);
+		if (K0 >= KMax)
+		{
+			return 0.f;   // too slow: the waves it would make are shorter than its pressure resolves
+		}
+
+		// The pressure on the grid of the shortest wave's half length, π / KMax (a hull's piece): the loads in each cell summed at their
+		// |load|-weighted centre and spread over the cell's merged area (σ² = Σ σ_i², the disc of the summed areas), the loads under
+		// WaveLoadSkipShare of the largest left out. The cells then go into WaveSpreadGroups groups by their spread, so the spread's
+		// filter exp(-k² σ² / 2) is taken once per group, not once per load, and the phases by the float SinCos. A 5 m runabout at 25 cm
+		// pieces: 318 loads into 122 cells, about 16 500 SinCos and 950 Exp an evaluation instead of 45 500 each of Exp, Sin and Cos, and
+		// R within 1.3 % of the loads' own from 2 m/s up (below that it is under 20 N against a 690 N hump, made of the shortest waves the
+		// cells only roughly keep). A smooth pressure ridge still comes within 1 % of Lamb's two-dimensional result from 3 m/s up, as before.
+		float Largest = 0.f;
+		for (const FVector4f& Load : Loads)
+		{
+			Largest = FMath::Max(Largest, FMath::Abs(Load.Z));
+		}
+		if (!(Largest > 0.f))
+		{
+			return 0.f;
+		}
+		const float Skip = WaveLoadSkipShare * Largest;
+		const float Cell = PI / KMax;
+		TMap<FIntPoint, int32>& CellOf = WaveCellOf;
+		TArray<FWaveCell>& Cells = WaveCells;
+		CellOf.Reset();
+		Cells.Reset();
+		for (const FVector4f& Load : Loads)
+		{
+			const float Weight = FMath::Abs(Load.Z);
+			if (!(Weight >= Skip))
+			{
+				continue;
+			}
+			const FIntPoint Key(FMath::FloorToInt32(Load.X / Cell), FMath::FloorToInt32(Load.Y / Cell));
+			int32 CellIndex = 0;
+			if (const int32* Found = CellOf.Find(Key))
+			{
+				CellIndex = *Found;
+			}
+			else
+			{
+				CellIndex = Cells.AddDefaulted();
+				CellOf.Add(Key, CellIndex);
+			}
+			FWaveCell& Merged = Cells[CellIndex];
+			Merged.Load += Load.Z;
+			Merged.Weight += Weight;
+			Merged.X += static_cast<double>(Weight) * Load.X;
+			Merged.Y += static_cast<double>(Weight) * Load.Y;
+			Merged.Spread += static_cast<double>(Load.W) * Load.W;
+		}
+		double SpreadMax = 0.0;
+		for (FWaveCell& Merged : Cells)
+		{
+			Merged.Spread = FMath::Sqrt(Merged.Spread);
+			SpreadMax = FMath::Max(SpreadMax, Merged.Spread);
+		}
+		const double SpreadStep = SpreadMax / (WaveSpreadGroups - 1);
+		int32 GroupStart[WaveSpreadGroups + 1] = {};
+		for (FWaveCell& Merged : Cells)
+		{
+			Merged.Group = SpreadStep > 0.0 ? FMath::Clamp(FMath::RoundToInt32(Merged.Spread / SpreadStep), 0, WaveSpreadGroups - 1) : 0;
+			++GroupStart[Merged.Group + 1];
+		}
+		int32 GroupFill[WaveSpreadGroups] = {};
+		for (int32 Group = 0; Group < WaveSpreadGroups; ++Group)
+		{
+			GroupStart[Group + 1] += GroupStart[Group];
+			GroupFill[Group] = GroupStart[Group];
+		}
+		// The cells as loads (x, y, the summed load), group by group.
+		TArray<FVector4f>& Sorted = WaveCellLoads;
+		Sorted.SetNumUninitialized(Cells.Num(), EAllowShrinking::No);
+		// |P̂|² swings about once for every π of phase across the pressure, which reaches KMax × its length: enough samples for about eight
+		// a swing (a 5 m hull of 25 cm pieces takes about 160), even for Simpson's rule.
+		double Reach = 0.0;
+		for (const FWaveCell& Merged : Cells)
+		{
+			const double X = Merged.X / Merged.Weight;
+			const double Y = Merged.Y / Merged.Weight;
+			Reach = FMath::Max(Reach, FMath::Max(FMath::Abs(X), FMath::Abs(Y)));
+			Sorted[GroupFill[Merged.Group]++] = FVector4f(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Merged.Load), 0.f);
+		}
+
+		const double TanMax = FMath::Sqrt(KMax / K0 - 1.0);
+		const int32 Intervals = 2 * FMath::Clamp(FMath::CeilToInt32(2.0 * KMax * Reach * 8.0 / (2.0 * UE_DOUBLE_PI)), 16, 128);
+		const double Step = 2.0 * TanMax / Intervals;
+		const bool bFinite = Depth > 0.f;
+		double Sum = 0.0;
+		for (int32 Index = 0; Index <= Intervals; ++Index)
+		{
+			const double Tan = -TanMax + Index * Step;
+			const double Sec2 = 1.0 + Tan * Tan;
+			const double Cos = 1.0 / FMath::Sqrt(Sec2);
+			const double Sin = Tan * Cos;
+			double K = K0 * Sec2;
+			double Factor = 1.0;   // T / |T - kh sech²(kh)|: 1 in deep water
+			if (bFinite && K * Depth < 12.0)
+			{
+				// g tanh(kh) = U² cos²θ k: no root where U cos θ passes the longest wave's speed √(gh) (no wave keeps station that way);
+				// below it, one between 0 and the deep root, by bisection.
+				const double A = static_cast<double>(U) * U * Cos * Cos;
+				if (A >= Gravity * static_cast<double>(Depth))
+				{
+					continue;
+				}
+				double Low = 0.0;
+				double High = K;
+				for (int32 Iteration = 0; Iteration < 40; ++Iteration)
+				{
+					const double Mid = 0.5 * (Low + High);
+					(Gravity * FMath::Tanh(Mid * Depth) - A * Mid > 0.0 ? Low : High) = Mid;
+				}
+				K = 0.5 * (Low + High);
+				const double Tanh = FMath::Tanh(K * Depth);
+				const double Slope = FMath::Abs(Tanh - K * Depth * (1.0 - Tanh * Tanh));
+				Factor = FMath::Min(Tanh / FMath::Max(Slope, 1e-12), 10.0);
+			}
+			if (K > KMax)
+			{
+				continue;
+			}
+			double Real = 0.0;
+			double Imaginary = 0.0;
+			for (int32 Group = 0; Group < WaveSpreadGroups; ++Group)
+			{
+				if (GroupStart[Group] == GroupStart[Group + 1])
+				{
+					continue;
+				}
+				double GroupReal = 0.0;
+				double GroupImaginary = 0.0;
+				for (int32 Entry = GroupStart[Group]; Entry < GroupStart[Group + 1]; ++Entry)
+				{
+					const FVector4f& Load = Sorted[Entry];
+					float Sine = 0.f;
+					float Cosine = 0.f;
+					FMath::SinCos(&Sine, &Cosine, static_cast<float>(K * (Load.X * Cos + Load.Y * Sin)));
+					GroupReal += static_cast<double>(Load.Z) * Cosine;
+					GroupImaginary += static_cast<double>(Load.Z) * Sine;
+				}
+				const double GroupSpread = Group * SpreadStep;
+				const double Filter = FMath::Exp(-0.5 * K * K * GroupSpread * GroupSpread);
+				Real += Filter * GroupReal;
+				Imaginary += Filter * GroupImaginary;
+			}
+			const double Simpson = (Index == 0 || Index == Intervals) ? 1.0 : ((Index & 1) ? 4.0 : 2.0);
+			Sum += Simpson * (Real * Real + Imaginary * Imaginary) * Cos * K * K * K * Factor / Sec2;   // dθ = d(tan θ) / sec²θ
+		}
+		const double Resistance = Sum * Step / 3.0 / (2.0 * UE_DOUBLE_PI * Rho * Gravity);
+		return FMath::IsFinite(Resistance) ? static_cast<float>(FMath::Max(Resistance, 0.0)) : 0.f;
 	}
 }

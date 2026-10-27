@@ -17,9 +17,12 @@
 #include "EngineUtils.h"
 #include "Factories/LevelFactory.h"
 #include "MaterialShared.h"
+#include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
+#include "RHI.h"
 #include "ShaderCompiler.h"
 #include "Modules/ModuleManager.h"
 #include "NiagaraCommon.h"
@@ -1243,6 +1246,35 @@ FString UFNBDevLibrary::CompileMaterialErrors(UMaterialInterface* Material)
 	if (!Base)
 	{
 		return TEXT("ERRORS: no material");
+	}
+	if (!IsRunningCommandlet())
+	{
+		// Use the editor's material update context and the asset-owned resource. A scratch
+		// AllocateResource/DeferredDelete pair is unsafe in a live editor: shader compilation
+		// retains references to that resource and its destruction can trip the lifetime check.
+		UMaterialEditingLibrary::RecompileMaterial(Base);
+		if (UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Material))
+		{
+			UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+		}
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
+		}
+		FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform);
+		if (!Resource)
+		{
+			return TEXT("ERRORS: no live material resource after editor compilation");
+		}
+		Resource->FinishCompilation();
+		const TArray<FString> CompileErrors = Resource->GetCompileErrors();
+		const FMaterialShaderMap* ShaderMap = Resource->GetGameThreadShaderMap();
+		const bool bValidMap = ShaderMap && ShaderMap->IsValidForRendering();
+		if (CompileErrors.IsEmpty() && bValidMap)
+		{
+			return TEXT("OK");
+		}
+		return FString::Printf(TEXT("ERRORS: live shadermap=%d\n"), bValidMap ? 1 : 0) + FString::Join(CompileErrors, TEXT("\n"));
 	}
 	// A commandlet keeps no rendering resources, so compile a resource of our own for the Windows SM6 platform (as cooking does),
 	// synchronously, and read its errors. A material instance compiles its static permutation.

@@ -10,6 +10,10 @@
 // the plugin's, at the wave grid's size), at the window's own cell centres like everything here: the grid lags the window by the scroll
 // remainder, so the window's cell reads the grid bilinearly at + Remainder (exactly when there is none), as Wave Export reads eta. The
 // surface material samples that target by the simulation's UV, as it samples RT_PressureDivergence. 0 while the foam is off.
+// Interface version 6: the export is (F1, F2, v, 0): the fresh foam (Foam), the aged foam (FoamAged) and the wave state's vertical velocity
+// v (cm/s, the Wave attribute's .y), each read the same way, exactly when there is no remainder, else bilinearly at + Remainder. The plugin
+// allocates the target as RGBA16F; an RG or R target keeps the channels it has. F1 and F2 are 0 while the foam is off; v is written
+// whenever the target is (for readers to come: nothing reads it yet). This overwrites Wave Prepare's scratch, so readers never see it.
 int IX;
 int IY;
 WaveAux.ExecToIndex(IX, IY);
@@ -35,18 +39,27 @@ WaveAux.SetRenderTargetValue(true, IX, IY, float4(Wet, Depth, Drift.x, Drift.y))
 if (FoamExport)
 {
 	float Foam = 0.0;
-	if (FoamEnabled)
+	float FoamAged = 0.0;
+	float2 FoamState = float2(0.0, 0.0);
+	if (dot(Remainder, Remainder) <= 1e-4)
 	{
-		if (dot(Remainder, Remainder) <= 1e-4)
+		WaveGrid.GetPreviousVector2DValue<Attribute=Wave>(IX, IY, FoamState);
+		if (FoamEnabled)
 		{
 			WaveGrid.GetPreviousFloatValue<Attribute=Foam>(IX, IY, Foam);
-		}
-		else
-		{
-			float2 FoamPos = float2(IX, IY) + Remainder;
-			WaveGrid.SamplePreviousGridFloatValue<Attribute=Foam>((FoamPos + 0.5) / Cells, Foam);
+			WaveGrid.GetPreviousFloatValue<Attribute=FoamAged>(IX, IY, FoamAged);
 		}
 	}
-	WaveFoam.SetRenderTargetValue(true, IX, IY, float4(Foam, 0.0, 0.0, 0.0));
+	else
+	{
+		float2 FoamPos = float2(IX, IY) + Remainder;
+		WaveGrid.SamplePreviousGridVector2DValue<Attribute=Wave>((FoamPos + 0.5) / Cells, FoamState);
+		if (FoamEnabled)
+		{
+			WaveGrid.SamplePreviousGridFloatValue<Attribute=Foam>((FoamPos + 0.5) / Cells, Foam);
+			WaveGrid.SamplePreviousGridFloatValue<Attribute=FoamAged>((FoamPos + 0.5) / Cells, FoamAged);
+		}
+	}
+	WaveFoam.SetRenderTargetValue(true, IX, IY, float4(Foam, FoamAged, FoamState.y, 0.0));
 }
 Done = Wet;

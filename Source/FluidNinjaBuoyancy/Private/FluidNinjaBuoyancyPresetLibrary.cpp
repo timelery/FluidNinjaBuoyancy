@@ -384,11 +384,48 @@ bool UFluidNinjaBuoyancyPresetLibrary::ApplyPresetToComponent(UFluidNinjaBuoyanc
 	Component->SplashMinWatts = Preset->SplashMinWatts;
 	Component->MaxSplashStrength = FMath::Max(Preset->MaxSplashStrength, 0.2f);
 	Component->SplashScale = Preset->SplashScale;
+	Component->bSpraySheets = Preset->bSpraySheets;
+	Component->SprayDeadriseDeg = FMath::Clamp(Preset->SprayDeadriseDeg, 0.f, 45.f);
+	Component->HullFlow = Preset->HullFlow;
+	Component->PlaningPressureCoefficient = FMath::Clamp(Preset->PlaningPressureCoefficient, 0.1f, 1.5f);
+	FString PropulsionText;
+	if (Preset->bSetPropulsion)
+	{
+		// The propeller at its share of the half extents from the centre of the mesh's bounds (Centre, scaled like the hull), in the body's
+		// frame at world size, Thrust Location's frame; the rudder (an outboard's lower unit) at the same place.
+		const FVector Place = Centre + Preset->PropLocationShare * Geometry.HalfExtent;
+		Component->bPropulsion = true;
+		Component->bConsoleControl = false;
+		Component->PropulsionModel = Preset->PropulsionModel;
+		Component->EnginePowerKw = FMath::Clamp(Preset->EnginePowerKw, 1.f, 2000.f);
+		Component->EngineMaxRpm = FMath::Clamp(Preset->EngineMaxRpm, 1000.f, 15000.f);
+		Component->GearRatio = FMath::Clamp(Preset->GearRatio, 0.25f, 10.f);
+		Component->PropDiameterCm = FMath::Clamp(Preset->PropDiameterCm, 5.f, 300.f);
+		Component->PropPitchRatio = FMath::Clamp(Preset->PropPitchRatio, 0.4f, 2.f);
+		Component->bSteerableThrust = Preset->bSteerableThrust;
+		Component->ThrustLocation = Place;
+		Component->ThrustDirection = FVector::ForwardVector;
+		Component->RudderLocation = Place;
+		Component->RudderAreaCm2 = FMath::Max(Preset->RudderAreaCm2, 0.f);
+		Component->MaxRudderAngle = FMath::Clamp(Preset->MaxRudderAngle, 0.f, 60.f);
+		PropulsionText = FString::Printf(TEXT("; a %.0f kW propeller at (%.0f, %.0f, %.0f) cm"), Component->EnginePowerKw, Place.X, Place.Y, Place.Z);
+	}
+	// The keel, by every preset (0 turns it off): at its share of the half extents from the centre of the mesh's bounds, the propeller's
+	// frame.
+	const FVector KeelPlace = Centre + Preset->KeelLocationShare * Geometry.HalfExtent;
+	Component->KeelAreaCm2 = FMath::Max(Preset->KeelAreaCm2, 0.f);
+	Component->KeelDepthCm = FMath::Max(Preset->KeelDepthCm, 1.f);
+	Component->KeelLocation = KeelPlace;
+	if (Component->KeelAreaCm2 > 0.f)
+	{
+		PropulsionText += FString::Printf(TEXT("; a %.0f cm2 keel at (%.0f, %.0f, %.0f) cm"), Component->KeelAreaCm2, KeelPlace.X, KeelPlace.Y, KeelPlace.Z);
+	}
 
 #if WITH_EDITOR
 	Owner->MarkPackageDirty();
 #endif
 
-	OutReport = FString::Printf(TEXT("%s: %s over %s of collision; %s; %s%s"), *Name, *HullText, *Litres(Geometry.VolumeCm3), *MassText, *AttitudeText, *BalanceText);
+	OutReport = FString::Printf(TEXT("%s: %s over %s of collision; %s; %s%s%s"), *Name, *HullText, *Litres(Geometry.VolumeCm3), *MassText, *AttitudeText,
+		*BalanceText, *PropulsionText);
 	return true;
 }

@@ -11,8 +11,11 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
+#include "Engine/Texture2D.h"
 #include "FluidNinjaBuoyancyComponent.h"
 #include "FluidNinjaBuoyancyCore.h"
+#include "FluidNinjaBuoyancyRings.h"
+#include "FluidNinjaBuoyancyWindSea.h"
 #include "FluidNinjaBuoyancyLog.h"
 #include "FluidNinjaBuoyancySettings.h"
 #include "FluidNinjaBuoyancyStats.h"
@@ -56,7 +59,7 @@ namespace FluidNinjaBuoyancyWaveRuntime
 	 * YYYYMMDD) that has it, from the zip named here. An older core is refused like a stock one. */
 	constexpr int32 WaveRequiredInterfaceVersion = 2;
 	constexpr int32 WaveRequiredCoreBuild = 20261017;
-	const TCHAR* const WaveCoreZipName = TEXT("FluidNinjaLive_2.0.0.56_Waves_RelativeTracking_UE5.8.zip");
+	const TCHAR* const WaveCoreZipName = TEXT("FluidNinjaLive_2.0.0.56_Waves_RelativeTracking_UE5.8_core-e85f0659.zip");
 	/** The first interface with User.Wave.ScaleDown (the wave grid decoupled from the pressure buffer). An older core still runs, at 1. */
 	constexpr int32 WaveScaleDownInterfaceVersion = 3;
 	/** fnb.Waves.MaxActiveSims: the simulations are ranked this often (s); a running one keeps its place against a newcomer whose rank is
@@ -138,6 +141,21 @@ namespace FluidNinjaBuoyancyWaveRuntime
 	/** The first interface with the closed-window <v> pin and the in-step clamp of both mean-relax rates. An older core still runs, with
 	 * the level pinned through the mean of s alone. */
 	constexpr int32 WaveVPinInterfaceVersion = 5;
+	// Foam v2 (interface version 6): a second, aged foam channel (the fine foam and bubbles a white trail leaves, fading over tens of seconds),
+	// both channels spreading, a foam-only breaking slope, and the wash texture (User.WaveWashTexture): the whitewater the bodies wash into
+	// the foam (their propellers, sterns, spray landings) and the steady part of the impulse head, which makes no impact foam. The foam
+	// target is RGBA16F then (fresh, aged, the wave state's v, 0). Nothing of it touches (eta, v).
+	const FName WaveWashTextureName(TEXT("User.WaveWashTexture"));
+	const FName WaveFoamAgedDecayName(TEXT("User.Wave.FoamAgedDecay"));
+	const FName WaveFoamTransferName(TEXT("User.Wave.FoamTransfer"));
+	const FName WaveFoamDiffusionName(TEXT("User.Wave.FoamDiffusion"));
+	const FName WaveFoamAgedDiffusionName(TEXT("User.Wave.FoamAgedDiffusion"));
+	const FName WaveFoamSlopeName(TEXT("User.Wave.FoamSlope"));
+	const FName WaveFoamWashName(TEXT("User.Wave.FoamWash"));
+	/** The first interface with foam v2 and the wash texture. An older core still runs, with one foam channel and no wash. */
+	constexpr int32 WaveFoamV2InterfaceVersion = 6;
+	/** AddWaterFoam patches kept per simulation until a core tick reads them (the subsystem keeps at most this many alive). */
+	constexpr int32 WaveMaxKeptFoamPatches = 256;
 
 	/** fnb.Waves.SelfFieldDistanceCm: a body farther than this from the camera gets no own field (it makes waves and feels none); 0 gives
 	 * every body one. The fields' cost scales with the sum of their cells squared, so the far ones are most of it. A scalability variable,
@@ -246,6 +264,12 @@ namespace FluidNinjaBuoyancyWaveRuntime
 	int32 WaveMaxActiveSims = 0;
 	static FAutoConsoleVariableRef CVarWaveMaxActiveSims(TEXT("fnb.Waves.MaxActiveSims"), WaveMaxActiveSims,
 		TEXT("FluidNinja Waves: at most this many simulations run waves, those whose nearest wave source (a floating body on their surface, or a swimmer in their square) is nearest the camera, over the simulation's Importance; a simulation with no wave source ranks behind those with one. Ranked each second with 10 % of hysteresis and a second's dwell; the others are off (no waves, their bodies feel none) until they come near. Lower saves GPU time on levels with many simulations. 0 or less: all. Default 0 here, but the quality tiers set it: 1 / 2 / 3 / 4 / 0 (Low to Cinematic), so 4 at Epic, the desktop default."),
+		ECVF_Scalability | ECVF_Default);
+	/** fnb.Waves.MaxRasterLines: a cap on Wave Raster Lines, the vertical lines that test each cell when a hull is drawn into the waves
+	 * (0: the setting). The quality tiers set it: 8 / 8 / 16 / 0 / 0, Low to Cinematic, so Epic and Cinematic run the setting (32). */
+	int32 WaveMaxRasterLines = 0;
+	static FAutoConsoleVariableRef CVarWaveMaxRasterLines(TEXT("fnb.Waves.MaxRasterLines"), WaveMaxRasterLines,
+		TEXT("FluidNinja Waves: caps Wave Raster Lines (Project Settings > FluidNinja Buoyancy > Waves), the vertical lines that test each cell when a hull is drawn into the waves: a value above 0 can only lower the setting; 0 or less (the default) leaves it. The count used is the nearest of 1, 4, 8, 16 and 32 (ties the larger). Fewer lines: a cheaper raster, and a hull edge that fills a cell in coarser steps (1: the old centre-line raster, whose steps stood up as spikes at an upright hull side). Set by sg.WaterQuality (8 / 8 / 16 / 0 / 0, Low to Cinematic). Takes effect on the next frame; the Output Log notes each change."),
 		ECVF_Scalability | ECVF_Default);
 	/** fnb.Waves.SubmergeRelease: a rigid hull whose top goes under keeps pressing the static head it went under with, fading as
 	 * e^(−t/τ) with τ = √(w / g) (w its waterline width as it went under), and takes it back up the same way when it comes through the
@@ -540,6 +564,23 @@ namespace FluidNinjaBuoyancyWaveRuntime
 			}
 			UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy waves memory: %d targets, %.2f MB in all (the per-frame transients, a simulation's static head and impulse textures and a batch's WaveOp slices, come from the render graph's pool and are not counted)."),
 				Items.Num(), Total);
+		}));
+
+	/** fnb.Waves.RingsDump: the ring layer's response table of the first running simulation that has one (UFluidNinjaBuoyancyWaves::DumpRings):
+	 * R = dη/dr and G = η per 100 kg·cm/s at r = 25, 50, 100, 200 cm and t = 0.5, 1, 2, 4 s for each band, exact and as read, with σ_g and
+	 * the depth, for checking the table against a reference. */
+	static FAutoConsoleCommandWithWorldAndArgs CmdWaveRingsDump(TEXT("fnb.Waves.RingsDump"),
+		TEXT("FluidNinja Waves' ring layer: logs the ring response table of the first running simulation that has one (made with its first ring): R = d eta/dr and G = eta per 100 kg*cm/s at r = 25, 50, 100, 200 cm and t = 0.5, 1, 2, 4 s for each band, the exact integral beside what the surfaces read, with each band's grid sigma and the depth. No arguments."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* World)
+		{
+			const UFluidNinjaBuoyancySubsystem* Hydro = World ? World->GetSubsystem<UFluidNinjaBuoyancySubsystem>() : nullptr;
+			const UFluidNinjaBuoyancyWaves* Waves = Hydro ? Hydro->GetWaves() : nullptr;
+			if (!Waves)
+			{
+				UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy rings dump: no waves in this world (no FluidNinja Buoyancy subsystem)."));
+				return;
+			}
+			Waves->DumpRings();
 		}));
 
 	/** An int32 user parameter of the core: its instance's value (the override store lists every user parameter), else the system's
@@ -1185,7 +1226,8 @@ void UFluidNinjaBuoyancyWaves::Deactivate(const FString& Why)
 	CachedFirstTriangle.Reset();
 	CachedTriangles.Reset();
 	PendingPokes.Reset();
-	HiddenMaterials.Reset();
+	// Also restore the optional visual-cutout bypass if shutdown interrupts a capture's setup.
+	SetMirrorWavesHidden(false, {});
 	bRunning = false;
 	StatusLine = FString::Printf(TEXT("FluidNinja Buoyancy waves: off (%s)"), *Why);
 }
@@ -1479,12 +1521,18 @@ void UFluidNinjaBuoyancyWaves::BeginFrame()
 			Sim.PendingPokes.Insert(Sim.LastPokes, 0);
 			Sim.PendingErase.Insert(Sim.LastErase, 0);
 			Sim.bPendingEraseAll |= Sim.bLastEraseAll;
+			Sim.PendingFoamPatches.Insert(Sim.LastFoamPatches, 0);
+			if (Sim.PendingFoamPatches.Num() > FluidNinjaBuoyancyWaveRuntime::WaveMaxKeptFoamPatches)
+			{
+				Sim.PendingFoamPatches.RemoveAt(0, Sim.PendingFoamPatches.Num() - FluidNinjaBuoyancyWaveRuntime::WaveMaxKeptFoamPatches, EAllowShrinking::No);
+			}
 		}
 		Sim.bAwaitingConfirm = false;
 		Sim.LastImpulses.Reset();
 		Sim.LastPokes.Reset();
 		Sim.LastErase.Reset();
 		Sim.bLastEraseAll = false;
+		Sim.LastFoamPatches.Reset();
 		// The bodies' own fields take the same ticks, with the sources they were given last frame, before the gather reads them.
 		if (Sim.Delta > 0)
 		{
@@ -1564,6 +1612,14 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	Sim.WallBandCm = FMath::Max(Override.bOverrideWallBand ? Override.WallBandCm : Settings.WaveWallBandCm, 0.f);
 	Sim.NormalScale = Override.bOverrideNormalScale ? FMath::Max(Override.NormalScale, 0.f)
 		: (Input.SizeCm > 0.0 ? static_cast<float>(FMath::Max(Settings.WaveNormalScaleFactor, 0.f) / (0.005 * Input.SizeCm)) : 0.f);
+	Sim.CurrentCoupling = FMath::Max(Override.bOverrideCurrentCoupling ? Override.CurrentCoupling : Settings.WaveCurrentCoupling, 0.f);
+	Sim.Damping = FMath::Max(Override.bOverrideDamping ? Override.Damping : Settings.WaveDamping, 0.f);
+	Sim.FoamDecay = FMath::Max(Override.bOverrideFoamDecay ? Override.FoamDecay : Settings.FoamDecay, 0.f);
+	Sim.FoamAgedDecay = FMath::Max(Override.bOverrideFoamAgedDecay ? Override.FoamAgedDecay : Settings.FoamAgedDecay, 0.f);
+	Sim.FoamWake = FMath::Max(Override.bOverrideFoamWake ? Override.FoamWake : Settings.FoamWake, 0.f);
+	Sim.FoamTransfer = FMath::Clamp(Override.bOverrideFoamTransfer ? Override.FoamTransfer : Settings.FoamTransfer, 0.f, 1.f);
+	Sim.FoamDiffusion = FMath::Max(Override.bOverrideFoamDiffusion ? Override.FoamDiffusion : Settings.FoamDiffusion, 0.f);
+	Sim.FoamAgedDiffusion = FMath::Max(Override.bOverrideFoamAgedDiffusion ? Override.FoamAgedDiffusion : Settings.FoamAgedDiffusion, 0.f);
 	Sim.Importance = FMath::Max(Override.Importance, 0.01f);
 	Sim.ScaleDownWanted = WantedScaleDown(Override);
 
@@ -1603,7 +1659,7 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	{
 		if (!Sim.bWarned)
 		{
-			UE_LOG(LogFluidNinjaBuoyancy, Error, TEXT("FluidNinja Buoyancy waves: %s's %s (%s) has no user parameter %s: it is an older FluidNinja Waves core without the Wave Aux stage the bodies' own fields need, so this simulation makes no waves. Re-apply FluidNinja Waves (FluidNinjaBuoyancyDev/Tools/apply_fluidninja_waves.py) and copy the core in."),
+			UE_LOG(LogFluidNinjaBuoyancy, Error, TEXT("FluidNinja Buoyancy waves: %s's %s (%s) has no user parameter %s: it is an older FluidNinja Waves core without the Wave Aux stage the bodies' own fields need, so this simulation makes no waves. Re-apply FluidNinja Waves with the plugin's Tools/CorePatch/apply_fluidninja_waves.py (Tools/CorePatch/README.md), or install the current core zip."),
 				*Sim.Name, *GetNameSafe(Core), *GetPathNameSafe(Core->GetAsset()), *WaveAuxTargetName.ToString());
 			Sim.bWarned = true;
 		}
@@ -1769,7 +1825,10 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	// Its foam target (interface version 4): F per wave cell, one channel, written by the core's Wave Aux every tick (0 while the foam is
 	// off), sampled by the surfaces' dynamic materials (WaveFoamBuffer). A core before interface 4 has no User.WaveFoamTarget and gets none.
 	UTextureRenderTarget2D* FoamTarget = Sim.Foam.Get();
-	if (Sim.InterfaceVersion >= WaveFoamInterfaceVersion && (!FoamTarget || FoamTarget->SizeX != Cells.X || FoamTarget->SizeY != Cells.Y))
+	const bool bFoamV2 = Sim.InterfaceVersion >= WaveFoamV2InterfaceVersion;
+	const EPixelFormat FoamFormat = bFoamV2 ? PF_FloatRGBA : PF_R16F;   // interface 6: fresh, aged, the wave state's v
+	if (Sim.InterfaceVersion >= WaveFoamInterfaceVersion
+		&& (!FoamTarget || FoamTarget->SizeX != Cells.X || FoamTarget->SizeY != Cells.Y || FoamTarget->GetFormat() != FoamFormat))
 	{
 		if (!FoamTarget)
 		{
@@ -1777,14 +1836,35 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 			SourceTargets.Add(FoamTarget);
 			Sim.Foam = FoamTarget;
 		}
-		FoamTarget->RenderTargetFormat = RTF_R16f;
+		FoamTarget->RenderTargetFormat = bFoamV2 ? RTF_RGBA16f : RTF_R16f;
 		FoamTarget->ClearColor = FLinearColor::Transparent;
 		FoamTarget->AddressX = TA_Clamp;
 		FoamTarget->AddressY = TA_Clamp;
 		FoamTarget->Filter = TF_Bilinear;
 		FoamTarget->bCanCreateUAV = true;
-		FoamTarget->InitCustomFormat(Cells.X, Cells.Y, PF_R16F, true);
+		FoamTarget->InitCustomFormat(Cells.X, Cells.Y, FoamFormat, true);
 		FoamTarget->UpdateResourceImmediate(true);
+	}
+
+	// Its wash texture (interface version 6): W x H RGBA16F on the source texture's cells (its header places both), written with the
+	// source: the fresh and aged foam rates the bodies wash in, and the steady impulse head (B), which makes no impact foam.
+	UTextureRenderTarget2D* WashTarget = Sim.Wash.Get();
+	if (bFoamV2 && (!WashTarget || WashTarget->SizeX != Cells.X || WashTarget->SizeY != Cells.Y))
+	{
+		if (!WashTarget)
+		{
+			WashTarget = NewObject<UTextureRenderTarget2D>(this);
+			SourceTargets.Add(WashTarget);
+			Sim.Wash = WashTarget;
+		}
+		WashTarget->RenderTargetFormat = RTF_RGBA16f;
+		WashTarget->ClearColor = FLinearColor::Transparent;
+		WashTarget->AddressX = TA_Clamp;
+		WashTarget->AddressY = TA_Clamp;
+		WashTarget->Filter = TF_Nearest;
+		WashTarget->bCanCreateUAV = true;
+		WashTarget->InitCustomFormat(Cells.X, Cells.Y, PF_FloatRGBA, true);
+		WashTarget->UpdateResourceImmediate(true);
 	}
 
 	// The core's parameters, every frame (they survive a new asset or a re-activation that way).
@@ -1793,7 +1873,7 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	Core->SetVariableTextureRenderTarget(WaveAuxTargetName, Aux);
 	Core->SetVariableFloat(WaveDepthName, Sim.DepthCm);
 	Core->SetVariableFloat(WaveDepthFromBedName, Sim.bDepthFromBed ? 1.f : 0.f);
-	Core->SetVariableFloat(WaveDampingName, FMath::Max(Settings.WaveDamping, 0.f));
+	Core->SetVariableFloat(WaveDampingName, Sim.Damping);
 	Core->SetVariableFloat(WaveSpongeName, FMath::Max(Settings.WaveSpongeCm, 0.f));
 	Core->SetVariableFloat(WaveEdgeOpenName, Sim.bEdgeOpen ? 1.f : 0.f);
 	Core->SetVariableFloat(WaveWallAbsorptionName, Sim.WallAbsorption);
@@ -1801,7 +1881,7 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 	Core->SetVariableFloat(WaveShoreName, FMath::Max(Settings.WaveShoreDepthCm, 0.f));
 	Core->SetVariableFloat(WaveBreakingName, FMath::Max(Settings.WaveBreakingSlope, 0.01f));
 	Core->SetVariableFloat(WaveHyperviscosityName, FMath::Max(Settings.WaveHyperviscosity, 0.f));
-	Core->SetVariableFloat(WaveCurrentCouplingName, FMath::Max(Settings.WaveCurrentCoupling, 0.f));
+	Core->SetVariableFloat(WaveCurrentCouplingName, Sim.CurrentCoupling);
 	Core->SetVariableFloat(WaveMeanRelaxName, Sim.CoreMeanRelax);   // the bodies' own fields take fnb.Waves.SelfMeanRelax (SetSelfStep)
 	// The closed-window <v> pin's rate, on a core that has the parameter (interface version 5; setting one a core lacks would add a stray
 	// user parameter to its overrides). Its Wave Step skips the pin in an open window by itself, so every interface-5 core gets the rate.
@@ -1822,11 +1902,74 @@ bool UFluidNinjaBuoyancyWaves::UpdateSim(FSimState& Sim, const FFluidNinjaWaveSi
 		const bool bFoamOn = Settings.bFoam && WaveFoamOn != 0;
 		Core->SetVariableTextureRenderTarget(WaveFoamTargetName, FoamTarget);
 		Core->SetVariableFloat(WaveFoamName, bFoamOn ? 1.f : 0.f);
-		Core->SetVariableFloat(WaveFoamDecayName, FMath::Max(Settings.FoamDecay, 0.f));
+		Core->SetVariableFloat(WaveFoamDecayName, Sim.FoamDecay);
 		Core->SetVariableFloat(WaveFoamBreakingName, FMath::Max(Settings.FoamBreaking, 0.f));
-		Core->SetVariableFloat(WaveFoamWakeName, FMath::Max(Settings.FoamWake, 0.f));
+		// Foam Wake Reference Cell Cm: the waterline foam per metre of hull the same on any grid (the core's band is a cell or two wide).
+		const float WakeCellScale = Settings.FoamWakeReferenceCellCm > 0.f && Sim.CellCm > 0.0 ? static_cast<float>(Settings.FoamWakeReferenceCellCm / Sim.CellCm) : 1.f;
+		Core->SetVariableFloat(WaveFoamWakeName, Sim.FoamWake * WakeCellScale);
 		Core->SetVariableFloat(WaveFoamImpactName, FMath::Max(Settings.FoamImpact, 0.f));
 		Sim.bFoam = bFoamOn;
+		// Foam v2 and the wash (interface version 6).
+		if (bFoamV2 && WashTarget)
+		{
+			Core->SetVariableTexture(WaveWashTextureName, WashTarget);
+			Core->SetVariableFloat(WaveFoamAgedDecayName, Sim.FoamAgedDecay);
+			Core->SetVariableFloat(WaveFoamTransferName, Sim.FoamTransfer);
+			Core->SetVariableFloat(WaveFoamDiffusionName, Sim.FoamDiffusion);
+			Core->SetVariableFloat(WaveFoamAgedDiffusionName, Sim.FoamAgedDiffusion);
+			Core->SetVariableFloat(WaveFoamSlopeName, FMath::Clamp(Settings.FoamSlope, 0.f, 2.f));
+			Core->SetVariableFloat(WaveFoamWashName, FMath::Max(Settings.FoamWash, 0.f));
+		}
+	}
+	// The wind sea (interface version 7): its table of incident wind waves, advanced and written every frame, the long band added to B by
+	// the core's Wave Export and the short band drawn by the surfaces (WaveWindSeaTable, bound with the foam buffer below). Without one
+	// (Wind Sea Height 0, fnb.Waves.WindSea 0) the core gets no table and adds nothing; an older core has no parameter and is not sent one.
+	Sim.WindSeaTable.Reset();
+	if (Sim.InterfaceVersion >= FluidNinjaBuoyancyWindSea::InterfaceVersion)
+	{
+		UTexture2D* Table = nullptr;
+		if (Override.WindSeaHeightCm > 0.f)
+		{
+			if (!Sim.WindSea)
+			{
+				Sim.WindSea = MakeShared<FluidNinjaBuoyancyWindSea::FState>();
+			}
+			FluidNinjaBuoyancyWindSea::FInput Sea;
+			const UWorld* SeaWorld = GetOwnerWorld();
+			Sea.Now = SeaWorld ? SeaWorld->GetTimeSeconds() : 0.0;
+			Sea.WindowCentre = Sim.Centre;
+			Sea.PressureCellCm = Sim.PressureCellCm;
+			Sea.DepthCm = Sim.DepthCm;
+			if (const UFluidNinjaBuoyancySubsystem* Subsystem = Owner.Get())
+			{
+				const FVector WindVelocity = Subsystem->GetWind().Velocity;
+				Sea.WindCmS = FVector2D(WindVelocity.X, WindVelocity.Y);
+			}
+			Sea.Seed = GetTypeHash(Sim.Name);
+			Table = Sim.WindSea->Update(Override, Sea);
+		}
+		else
+		{
+			Sim.WindSea.Reset();
+		}
+		Core->SetVariableTexture(FluidNinjaBuoyancyWindSea::CoreTextureName, Table);
+		Sim.WindSeaTable = Table;
+	}
+	// The ring layer (FluidNinjaBuoyancyRings.h), from the simulation's first ring on: its rings aged and its table written, on the grid the
+	// waves run on (the LUT worked out again when its cell, the depth or the viscosity changes). The core takes nothing of it; the surfaces
+	// get its table and LUT (bound with the foam buffer, at once when either object is new). An empty table holds N = 0 and draws nothing.
+	if (Sim.Rings)
+	{
+		const UWorld* RingWorld = GetOwnerWorld();
+		Sim.Rings->Update(RingWorld ? RingWorld->GetTimeSeconds() : 0.0, Sim.Centre, Sim.CellCm, Sim.DepthCm);
+		UTexture2D* RingTable = Sim.Rings->GetTable();
+		UTexture2D* RingLUT = Sim.Rings->GetLUT();
+		if (Sim.RingTable.Get() != RingTable || Sim.RingLUT.Get() != RingLUT)
+		{
+			bRingTexturesChanged = true;
+		}
+		Sim.RingTable = RingTable;
+		Sim.RingLUT = RingLUT;
 	}
 	Sim.bSwitchedOn = true;
 	if (!Sim.bActive)
@@ -1881,11 +2024,28 @@ void UFluidNinjaBuoyancyWaves::StopSim(FSimState& Sim)
 	Sim.PendingPokes.Reset();
 	Sim.PendingErase.Reset();
 	Sim.bPendingEraseAll = false;
+	Sim.PendingFoamPatches.Reset();
 	Sim.LastImpulses.Reset();
 	Sim.LastPokes.Reset();
 	Sim.LastErase.Reset();
+	Sim.LastFoamPatches.Reset();
 	Sim.bAwaitingConfirm = false;
 	Sim.bRestart = true;
+	// Its wind sea starts afresh when it runs again; the surfaces drop the table with their next update (about a second).
+	Sim.WindSea.Reset();
+	Sim.WindSeaTable.Reset();
+	// Its rings go too, the table written empty first: a surface that keeps it bound (one no longer shown, so not bound again) draws nothing.
+	if (Sim.Rings)
+	{
+		Sim.Rings->Clear();
+	}
+	if (Sim.RingTable.IsValid() || Sim.RingLUT.IsValid())
+	{
+		bRingTexturesChanged = true;
+	}
+	Sim.Rings.Reset();
+	Sim.RingTable.Reset();
+	Sim.RingLUT.Reset();
 }
 
 void UFluidNinjaBuoyancyWaves::ReleaseSelf(FBodyState& Body)
@@ -2175,7 +2335,7 @@ void UFluidNinjaBuoyancyWaves::SetSelfStep(FluidNinjaBuoyancyWaveSource::FSelf& 
 {
 	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
 	Self.DepthCm = Body.DepthCm > 0.f ? Body.DepthCm : Sim.DepthCm;
-	Self.Damping = FMath::Max(Settings.WaveDamping, 0.f);
+	Self.Damping = Sim.Damping;   // as the core is given it (UpdateSim): its Wave Sims entry's, else the project's
 	Self.Hyperviscosity = FMath::Max(Settings.WaveHyperviscosity, 0.f);
 	Self.ShoreDepthCm = FMath::Max(Settings.WaveShoreDepthCm, 0.f);
 	Self.BreakingSlope = FMath::Max(Settings.WaveBreakingSlope, 0.01f);   // as the core is given it
@@ -2523,6 +2683,7 @@ void UFluidNinjaBuoyancyWaves::UpdateTriangleCache(const TArray<TSharedPtr<const
 void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<TWeakObjectPtr<UPrimitiveComponent>>& Shown)
 {
 	const FName Parameter = UFluidNinjaBuoyancySettings::Get().WaveHeightScaleParameter;
+	static const FName PhysicsCaptureParameter(TEXT("LFPhysicsWaterCapture"));
 	if (!bHidden)
 	{
 		for (const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>& Kept : HiddenMaterials)
@@ -2533,13 +2694,18 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 			}
 		}
 		HiddenMaterials.Reset();
+		for (const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>& Kept : PhysicsCaptureMaterials)
+		{
+			if (UMaterialInstanceDynamic* Material = Kept.Key.Get())
+			{
+				Material->SetScalarParameterValue(PhysicsCaptureParameter, Kept.Value);
+			}
+		}
+		PhysicsCaptureMaterials.Reset();
 		return;
 	}
 	UnhiddenSurfaces = 0;
-	if (!IsActive() || Parameter.IsNone())
-	{
-		return;
-	}
+	const bool bHideWaveHeight = IsActive() && !Parameter.IsNone();
 	// The dynamic materials are found again every frame: FluidNinja makes new ones during play (Recollect Output Material Targets During
 	// Game Time).
 	TArray<UMaterialInterface*> Used;
@@ -2560,6 +2726,22 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 			{
 				continue;
 			}
+			// The mirror must retain water beneath an intact hull even while waves are disabled. The optional scalar affects this
+			// physics capture only; camera captures and planar reflections keep the material's normal visual cutout.
+			if (!PhysicsCaptureMaterials.ContainsByPredicate([Material](const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>& Kept)
+				{ return Kept.Key.Get() == Material; }))
+			{
+				float Previous = 0.f;
+				if (Material->GetScalarParameterValue(FHashedMaterialParameterInfo(PhysicsCaptureParameter), Previous))
+				{
+					PhysicsCaptureMaterials.Emplace(Material, Previous);
+					Material->SetScalarParameterValue(PhysicsCaptureParameter, 1.f);
+				}
+			}
+			if (!bHideWaveHeight)
+			{
+				continue;
+			}
 			if (HiddenMaterials.ContainsByPredicate([Material](const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>& Kept) { return Kept.Key.Get() == Material; }))
 			{
 				bSurfaceHidden = true;   // shared with a surface already done
@@ -2573,6 +2755,10 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 			HiddenMaterials.Emplace(Material, Value);
 			Material->SetScalarParameterValue(Parameter, 0.f);
 			bSurfaceHidden = true;
+		}
+		if (!bHideWaveHeight)
+		{
+			continue;
 		}
 		// A surface of a running wave simulation that could not hide its waves: the mirror shows them, and the floaters on it would feel their
 		// own waves through W besides B - B_self (the self-excitation the own fields are there to remove). Said, not worked around.
@@ -2645,6 +2831,17 @@ bool UFluidNinjaBuoyancyWaves::GetBodyFeel(int32 BodyId, FFluidNinjaWaveBodyFeel
 		Out.MotionHz = Body->MotionOmega / (2.0 * UE_DOUBLE_PI);
 	}
 	return true;
+}
+
+float UFluidNinjaBuoyancyWaves::GetBodyDepthCm(int32 BodyId) const
+{
+	const FBodyState* Body = Bodies.Find(BodyId);
+	const FSimState* Sim = Body ? FindSim(Body->Sim) : nullptr;
+	if (!bRunning || !Sim || !Sim->bActive)
+	{
+		return 0.f;
+	}
+	return Body->DepthCm > 0.f ? Body->DepthCm : Sim->DepthCm;
 }
 
 void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWorldInput& Input)
@@ -2738,14 +2935,41 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		{
 			Sim.bPendingEraseAll = true;
 		}
+		// The bench's fresh water has no rings either (written empty now; the next ring starts a new table).
+		if (bClear && Sim.Rings)
+		{
+			Sim.Rings->Clear();
+		}
 	}
 	// Each simulation's surfaces show its waves' slope at its own WaveNormalScale, and sample its foam target as WaveFoamBuffer (about once
-	// a second: FluidNinja makes new dynamic materials during play).
-	if (Now >= NextNormalScale)
+	// a second: FluidNinja makes new dynamic materials during play; at once when a simulation's ring table or LUT object changed, so a
+	// first ring is drawn from its first frame).
+	if (Now >= NextNormalScale || bRingTexturesChanged)
 	{
 		NextNormalScale = Now + 1.0;
+		bRingTexturesChanged = false;
 		const FName NormalParameter = Settings.WaveNormalScaleParameter;
+		// A ring texture where the material has the parameter (WaveRingTable, WaveRingLUT): the simulation's once its ring state made it, else
+		// the material's own default (black, which draws no rings).
+		const auto BindRingTexture = [](UMaterialInstanceDynamic& Material, const FName& Name, UTexture* Wanted)
+		{
+			UTexture* Bound = nullptr;
+			if (!Material.GetTextureParameterValue(FHashedMaterialParameterInfo(Name), Bound))
+			{
+				return;
+			}
+			if (!Wanted && Material.Parent)
+			{
+				Material.Parent->GetTextureParameterValue(FHashedMaterialParameterInfo(Name), Wanted);
+			}
+			if (Wanted && Bound != Wanted)
+			{
+				Material.SetTextureParameterValue(Name, Wanted);
+			}
+		};
 		TArray<UMaterialInterface*> Used;
+		// Each simulation's own surface parameters (its Wave Sims entry's Surface Scalars, Colors and Textures), looked up once here.
+		TMap<int32, FFluidNinjaWaveSimSettings> SurfaceSettings;
 		for (const TPair<TWeakObjectPtr<UPrimitiveComponent>, int32>& Surface : Input.Surfaces)
 		{
 			const UPrimitiveComponent* Primitive = Surface.Key.Get();
@@ -2756,6 +2980,15 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 			}
 			const float Wanted = Sims[Shown].NormalScale;
 			UTextureRenderTarget2D* FoamWanted = Sims[Shown].Foam.Get();
+			const FFluidNinjaWaveSimSettings* Own = SurfaceSettings.Find(Shown);
+			if (!Own)
+			{
+				FFluidNinjaWaveSimSettings Resolved;
+				const UFluidNinjaWaveSimComponent* Component = nullptr;
+				bool bIniToo = false;
+				ResolveSimSettings(SimActor(Sims[Shown].Ninja.Get()), Resolved, Component, bIniToo);
+				Own = &SurfaceSettings.Add(Shown, MoveTemp(Resolved));
+			}
 			Used.Reset();
 			Primitive->GetUsedMaterials(Used);
 			for (UMaterialInterface* Interface : Used)
@@ -2776,6 +3009,50 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 				if (FoamWanted && Material->GetTextureParameterValue(FHashedMaterialParameterInfo(WaveFoamBufferParameterName), FoamBound) && FoamBound != FoamWanted)
 				{
 					Material->SetTextureParameterValue(WaveFoamBufferParameterName, FoamWanted);
+				}
+				// The wind sea's table (interface version 7), where the material has the wavelets (WaveWindSeaTable): the simulation's, or,
+				// while it has none, the material's own default (black), so no stale table goes on drawing.
+				UTexture* TableBound = nullptr;
+				if (Material->GetTextureParameterValue(FHashedMaterialParameterInfo(FluidNinjaBuoyancyWindSea::MaterialTableName), TableBound))
+				{
+					UTexture* TableWanted = Sims[Shown].WindSeaTable.Get();
+					if (!TableWanted && Material->Parent)
+					{
+						Material->Parent->GetTextureParameterValue(FHashedMaterialParameterInfo(FluidNinjaBuoyancyWindSea::MaterialTableName), TableWanted);
+					}
+					if (TableWanted && TableBound != TableWanted)
+					{
+						Material->SetTextureParameterValue(FluidNinjaBuoyancyWindSea::MaterialTableName, TableWanted);
+					}
+				}
+				// The ring layer's table and LUT.
+				BindRingTexture(*Material, FluidNinjaBuoyancyRings::MaterialTableName, Sims[Shown].RingTable.Get());
+				BindRingTexture(*Material, FluidNinjaBuoyancyRings::MaterialLUTName, Sims[Shown].RingLUT.Get());
+				// The simulation's own surface parameters, where the material has them.
+				for (const TPair<FName, float>& Scalar : Own->SurfaceScalars)
+				{
+					float Current = 0.f;
+					if (Material->GetScalarParameterValue(FHashedMaterialParameterInfo(Scalar.Key), Current) && !FMath::IsNearlyEqual(Current, Scalar.Value, 1e-6f))
+					{
+						Material->SetScalarParameterValue(Scalar.Key, Scalar.Value);
+					}
+				}
+				for (const TPair<FName, FLinearColor>& Colour : Own->SurfaceColors)
+				{
+					FLinearColor Current;
+					if (Material->GetVectorParameterValue(FHashedMaterialParameterInfo(Colour.Key), Current) && !Current.Equals(Colour.Value, 1e-6f))
+					{
+						Material->SetVectorParameterValue(Colour.Key, Colour.Value);
+					}
+				}
+				for (const TPair<FName, TSoftObjectPtr<UTexture>>& Texture : Own->SurfaceTextures)
+				{
+					UTexture* Current = nullptr;
+					UTexture* WantedTexture = Texture.Value.LoadSynchronous();
+					if (WantedTexture && Material->GetTextureParameterValue(FHashedMaterialParameterInfo(Texture.Key), Current) && Current != WantedTexture)
+					{
+						Material->SetTextureParameterValue(Texture.Key, WantedTexture);
+					}
 				}
 			}
 		}
@@ -3305,7 +3582,10 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		{
 			const FBodyState* Body = Bodies.Find(Pieces.Id);
 			FSimState* Sim = Body ? FindSim(Body->Sim) : nullptr;
-			if (!Sim || !Sim->bActive || Scale <= 0.f)
+			// A planing hull's pieces come scaled from the physics step (its steady pressure at Wave Planing Pressure Scale, the rest at Wave
+			// Impulse Scale); every other body's are scaled here.
+			const float PieceScale = Pieces.bScaled ? 1.f : Scale;
+			if (!Sim || !Sim->bActive || PieceScale <= 0.f)
 			{
 				continue;
 			}
@@ -3326,7 +3606,7 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 				{
 					continue;
 				}
-				const FVector4f Scaled(Piece.X, Piece.Y, Piece.Z * Scale, Piece.W);
+				const FVector4f Scaled(Piece.X, Piece.Y, Piece.Z * PieceScale, Piece.W);
 				Sim->PendingImpulses.Add(Scaled);
 				if (Own)
 				{
@@ -3334,6 +3614,36 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 				}
 				++NumImpulses;
 			}
+		}
+	}
+	// The whitewater washed into the foam this frame (interface version 6), into the simulation each patch falls in: state, written whole
+	// on every frame a simulation's source is written (a frame that writes none keeps the last). Only where the foam is on: the core reads
+	// the wash only then (UpdateSim set bFoam above, so a foam turned on this frame gets its wash in this frame's write).
+	for (FSimState& Sim : Sims)
+	{
+		Sim.FrameWashes.Reset();
+	}
+	for (const FFluidNinjaWaterWash& Wash : Input.Washes)
+	{
+		FSimState* Sim = SimAt(Wash.Location);
+		if (Sim && Sim->bActive && Sim->bFoam && Sim->Wash.IsValid() && (Wash.FreshRate > 0.f || Wash.AgedRate > 0.f) && !Wash.Location.ContainsNaN())
+		{
+			Sim->FrameWashes.Add(Wash);
+		}
+	}
+	// AddWaterFoam's patches on their last frame: nothing sends them again, so they are kept until a tick reads them, as the impulses are
+	// (pending until written; Niagara after, written again when no tick read the write).
+	for (const FFluidNinjaWaterWash& Wash : Input.FinalFoamPatches)
+	{
+		FSimState* Sim = SimAt(Wash.Location);
+		if (Sim && Sim->bActive && Sim->bFoam && Sim->Wash.IsValid() && (Wash.FreshRate > 0.f || Wash.AgedRate > 0.f) && !Wash.Location.ContainsNaN())
+		{
+			// At most as many as AddWaterFoam keeps alive (a core that stops ticking must not let them pile up): the oldest go first.
+			if (Sim->PendingFoamPatches.Num() >= FluidNinjaBuoyancyWaveRuntime::WaveMaxKeptFoamPatches)
+			{
+				Sim->PendingFoamPatches.RemoveAt(0, Sim->PendingFoamPatches.Num() - FluidNinjaBuoyancyWaveRuntime::WaveMaxKeptFoamPatches + 1, EAllowShrinking::No);
+			}
+			Sim->PendingFoamPatches.Add(Wash);
 		}
 	}
 	// The test bench's pokes, into the simulation each falls in.
@@ -3354,6 +3664,15 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 	Frame.SpongeRate = WaveSelfSpongeRate;
 	Frame.bControlled = Input.bControlled;
 	Frame.ControlledHeight = Input.ControlledHeight;
+	// Wave Raster Lines, capped by the tier (fnb.Waves.MaxRasterLines).
+	Frame.RasterLines = FluidNinjaBuoyancyWaveSource::SupportedRasterLines(
+		WaveMaxRasterLines > 0 ? FMath::Min(Settings.WaveRasterLines, WaveMaxRasterLines) : Settings.WaveRasterLines);
+	if (Frame.RasterLines != LoggedRasterLines)
+	{
+		UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy waves: hulls drawn into the waves with %d vertical line%s per cell (Wave Raster Lines %d, fnb.Waves.MaxRasterLines %d)."),
+			Frame.RasterLines, Frame.RasterLines == 1 ? TEXT("") : TEXT("s"), Settings.WaveRasterLines, WaveMaxRasterLines);
+		LoggedRasterLines = Frame.RasterLines;
+	}
 	Frame.Triangles = CachedTriangles;
 	Frame.TriangleSerial = TriangleSerial;
 	Frame.WorldTime = Now;
@@ -3388,6 +3707,7 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 	// Each simulation's write, when a tick will read it: Niagara first, only on frames whose ticks are counted already (a frame with none
 	// keeps everything pending for the next); Niagara after, every frame (BeginFrame writes again what a frame with none did not consume).
 	TArray<TPair<FTextureRenderTargetResource*, int32>> TargetResources;   // per source: its target's resource
+	TArray<TPair<FTextureRenderTargetResource*, int32>> WashResources;     // per source with a wash texture: its resource
 	int32 Written = 0;
 	// The deep heads alive this frame (sinkers' and fading), for the status line.
 	DeepHeadsSent = FadingDeep.Num();
@@ -3464,6 +3784,35 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 		Source.bEraseAll = Sim.bPendingEraseAll || Source.EraseBoxes.Num() > 256;
 		Sim.LastWriteBodies = Source.Bodies.Num();
 		Sim.LastWriteImpulses = Source.Impulses.Num();
+		// The wash texture (interface version 6), only while the foam is on (the core reads it only then): AddWaterFoam's kept last-frame
+		// patches and this frame's whitewater, grid-relative, two float4 each ((x, y, σ, 0), (fresh, aged, 0, 0)). The kept ones go first:
+		// the GPU takes at most 1024 patches a simulation, and they are the ones that would not come again.
+		if (UTextureRenderTarget2D* Wash = Sim.bFoam ? Sim.Wash.Get() : nullptr)
+		{
+			const auto AddWash = [&Source, &Sim](const FFluidNinjaWaterWash& Patch)
+			{
+				Source.Washes.Add(FVector4f(static_cast<float>(Patch.Location.X - Sim.Origin.X), static_cast<float>(Patch.Location.Y - Sim.Origin.Y),
+					FMath::Max(Patch.RadiusCm, 1.f), 0.f));
+				Source.Washes.Add(FVector4f(FMath::Max(Patch.FreshRate, 0.f), FMath::Max(Patch.AgedRate, 0.f), 0.f, 0.f));
+			};
+			Source.Washes.Reserve(2 * (Sim.PendingFoamPatches.Num() + Sim.FrameWashes.Num()));
+			for (const FFluidNinjaWaterWash& Kept : Sim.PendingFoamPatches)
+			{
+				AddWash(Kept);
+			}
+			for (const FFluidNinjaWaterWash& Patch : Sim.FrameWashes)
+			{
+				AddWash(Patch);
+			}
+			Source.bWash = true;
+			WashResources.Emplace(Wash->GameThread_GetRenderTargetResource(), Frame.Sources.Num() - 1);
+			Sim.LastWriteWashes = Sim.PendingFoamPatches.Num() + Sim.FrameWashes.Num();
+		}
+		else
+		{
+			// The foam is off (or the wash texture gone): the kept patches have nothing to go into, so they are not kept on.
+			Sim.PendingFoamPatches.Reset();
+		}
 		if (!Sim.bNiagaraFirst)
 		{
 			// Kept until the next frame says whether a tick consumed it.
@@ -3471,12 +3820,14 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 			Sim.LastPokes = MoveTemp(Sim.PendingPokes);
 			Sim.LastErase = MoveTemp(Sim.PendingErase);
 			Sim.bLastEraseAll = Sim.bPendingEraseAll;
+			Sim.LastFoamPatches = MoveTemp(Sim.PendingFoamPatches);
 			Sim.bAwaitingConfirm = true;
 		}
 		Sim.PendingImpulses.Reset();
 		Sim.PendingPokes.Reset();
 		Sim.PendingErase.Reset();
 		Sim.bPendingEraseAll = false;
+		Sim.PendingFoamPatches.Reset();
 		TargetResources.Emplace(Target->GameThread_GetRenderTargetResource(), Frame.Sources.Num() - 1);
 		++Written;
 	}
@@ -3616,7 +3967,7 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 	FTextureRenderTargetResource* MirrorResource = bMirror ? Input.Mirror.Target->GameThread_GetRenderTargetResource() : nullptr;
 	FTextureRenderTargetResource* AtlasResource = SelfAtlas ? SelfAtlas->GameThread_GetRenderTargetResource() : nullptr;
 	ENQUEUE_RENDER_COMMAND(FluidNinjaBuoyancyWavesFrame)(
-		[RenderState = GpuState, RenderFrame = MoveTemp(Frame), TargetResources, MirrorResource, AtlasResource, ProbeResources, StatsResource, SelfAuxResources](FRHICommandListImmediate& RHICmdList) mutable
+		[RenderState = GpuState, RenderFrame = MoveTemp(Frame), TargetResources, WashResources, MirrorResource, AtlasResource, ProbeResources, StatsResource, SelfAuxResources](FRHICommandListImmediate& RHICmdList) mutable
 		{
 			for (int32 Index = 0; Index < RenderFrame.Selves.Num() && Index < SelfAuxResources.Num(); ++Index)
 			{
@@ -3627,6 +3978,13 @@ void UFluidNinjaBuoyancyWaves::Tick(float DeltaSeconds, const FFluidNinjaWaveWor
 				if (RenderFrame.Sources.IsValidIndex(Entry.Value))
 				{
 					RenderFrame.Sources[Entry.Value].Target = Entry.Key ? Entry.Key->GetRenderTargetTexture().GetReference() : nullptr;
+				}
+			}
+			for (const TPair<FTextureRenderTargetResource*, int32>& Entry : WashResources)
+			{
+				if (RenderFrame.Sources.IsValidIndex(Entry.Value))
+				{
+					RenderFrame.Sources[Entry.Value].WashTarget = Entry.Key ? Entry.Key->GetRenderTargetTexture().GetReference() : nullptr;
 				}
 			}
 			RenderFrame.Mirror = MirrorResource ? MirrorResource->GetRenderTargetTexture().GetReference() : nullptr;
@@ -3689,8 +4047,15 @@ void UFluidNinjaBuoyancyWaves::BuildStatusLine(int32 NumBodies, int32 Resets, in
 		const FString ScaleText = Sim.ScaleDown == Sim.ScaleDownWanted ? FString::Printf(TEXT("scale-down %d"), Sim.ScaleDown)
 			: FString::Printf(TEXT("scale-down %d, %d asked: interface %d core"), Sim.ScaleDown, Sim.ScaleDownWanted, Sim.InterfaceVersion);
 		// The foam: running, off (the setting or fnb.Waves.Foam), or not there (a core before interface 4).
-		const TCHAR* FoamText = Sim.InterfaceVersion >= WaveFoamInterfaceVersion ? (Sim.bFoam ? TEXT(", foam") : TEXT(", foam off"))
-			: TEXT(", no foam (pre-4 core)");
+		// Interface 6: the second (aged) foam channel and the wash; how many patches the last write washed in.
+		// The wind sea (interface 7) follows the foam, while it runs (no " tick" and no "; " in it, as below).
+		const FString WindSeaText = Sim.WindSea && Sim.WindSeaTable.IsValid() ? TEXT(", ") + Sim.WindSea->Describe() : FString();
+		// The ring layer's rings, while it has any (the same rules).
+		const FString RingsText = Sim.Rings && Sim.Rings->Num() > 0 ? FString::Printf(TEXT(", rings %d"), Sim.Rings->Num()) : FString();
+		const FString FoamText = (Sim.InterfaceVersion < WaveFoamInterfaceVersion ? FString(TEXT(", no foam (pre-4 core)"))
+			: !Sim.bFoam ? FString(TEXT(", foam off"))
+			: Sim.InterfaceVersion >= WaveFoamV2InterfaceVersion ? FString::Printf(TEXT(", foam v2 (%d wash)"), Sim.LastWriteWashes)
+			: FString(TEXT(", foam"))) + WindSeaText + RingsText;
 		// The k = 0 rates it runs at (UpdateSim): the core's mean relax, the own fields', and the core's <v> pin (interface 5, walled windows
 		// only). After the tick count, and with no " tick" or "; " in it: the test bench reads the tick count as the first " tick" after the
 		// grid (CoreTicksOf) and "mean relax core R /s" from here (CoreMeanRelaxOf), within this simulation's part up to the next "; ".
@@ -3699,7 +4064,7 @@ void UFluidNinjaBuoyancyWaves::BuildStatusLine(int32 NumBodies, int32 Resets, in
 		const FString RelaxText = FString::Printf(TEXT(", mean relax core %.2f /s, self %.2f /s, %s"), Sim.CoreMeanRelax, Sim.SelfMeanRelax, *VPinText);
 		SimText += FString::Printf(TEXT("; %s%s: core build %d, interface %d, %d x %.2f cm (%s of %d pressure cells), depth %.0f cm, %s edge, normal scale %.3f%s, %d tick%s this frame (Niagara %s FluidNinja Buoyancy), last write %d bodies %d impulses%s%s"),
 			*Sim.Name, Sim.bFromComponent ? TEXT(" (component)") : TEXT(""), Sim.CoreBuild, Sim.InterfaceVersion, Sim.Cells.X, Sim.CellCm, *ScaleText, Sim.PressureCells.X, Sim.DepthCm,
-			Sim.bEdgeOpen ? TEXT("open") : *FString::Printf(TEXT("walled (absorbing %.2f/s over %.0f cm)"), Sim.WallAbsorption, Sim.WallBandCm), Sim.NormalScale, FoamText, Sim.Delta, Sim.Delta == 1 ? TEXT("") : TEXT("s"),
+			Sim.bEdgeOpen ? TEXT("open") : *FString::Printf(TEXT("walled (absorbing %.2f/s over %.0f cm)"), Sim.WallAbsorption, Sim.WallBandCm), Sim.NormalScale, *FoamText, Sim.Delta, Sim.Delta == 1 ? TEXT("") : TEXT("s"),
 			Sim.bNiagaraFirst ? TEXT("before") : TEXT("after"), Sim.LastWriteBodies, Sim.LastWriteImpulses, *RelaxText,
 			Sim.bPressureReady ? TEXT("") : TEXT(" (its pressure buffer is not RGBA16F: B is not read, the bodies feel no waves)"));
 	}
@@ -3748,12 +4113,27 @@ void UFluidNinjaBuoyancyWaves::ReportMemory(TArray<FFluidNinjaWaveMemoryItem>& O
 		}
 		if (const UTextureRenderTarget2D* FoamTarget = Sim.Foam.Get())
 		{
-			Add(Sim.Name + TEXT(": foam (User.WaveFoamTarget)"), FIntPoint(FoamTarget->SizeX, FoamTarget->SizeY), TEXT("R16F"), 2.0 * FoamTarget->SizeX * FoamTarget->SizeY);
+			const bool bFoamRGBA = FoamTarget->GetFormat() == PF_FloatRGBA;
+			Add(Sim.Name + TEXT(": foam (User.WaveFoamTarget)"), FIntPoint(FoamTarget->SizeX, FoamTarget->SizeY), bFoamRGBA ? TEXT("RGBA16F") : TEXT("R16F"),
+				(bFoamRGBA ? 8.0 : 2.0) * FoamTarget->SizeX * FoamTarget->SizeY);
+		}
+		if (const UTextureRenderTarget2D* WashTarget = Sim.Wash.Get())
+		{
+			Add(Sim.Name + TEXT(": wash (User.WaveWashTexture)"), FIntPoint(WashTarget->SizeX, WashTarget->SizeY), TEXT("RGBA16F"), 8.0 * WashTarget->SizeX * WashTarget->SizeY);
 		}
 		// The sinkers' summed deep heads (a uint per wave cell), kept by the render thread while the simulation has any.
 		if (Sim.LastWriteDeep > 0)
 		{
 			Add(Sim.Name + TEXT(": deep heads' sum (sinkers, fnb.Waves.PlungeSource)"), Sim.Cells, TEXT("uint"), 4.0 * Sim.Cells.X * Sim.Cells.Y);
+		}
+		// The ring layer's textures (8 bytes a LUT texel, 16 a table texel), from its first ring until it stops.
+		if (const UTexture2D* RingLUT = Sim.RingLUT.Get())
+		{
+			Add(Sim.Name + TEXT(": ring LUT (WaveRingLUT)"), FIntPoint(RingLUT->GetSizeX(), RingLUT->GetSizeY()), TEXT("RGBA16F"), 8.0 * RingLUT->GetSizeX() * RingLUT->GetSizeY());
+		}
+		if (const UTexture2D* RingTable = Sim.RingTable.Get())
+		{
+			Add(Sim.Name + TEXT(": ring table (WaveRingTable)"), FIntPoint(RingTable->GetSizeX(), RingTable->GetSizeY()), TEXT("RGBA32F"), 16.0 * RingTable->GetSizeX() * RingTable->GetSizeY());
 		}
 	}
 	// The self-field atlas (2 bytes a texel) and the pools behind it: per size, the render thread holds max(4, the peak number of fields of
@@ -3995,4 +4375,67 @@ double UFluidNinjaBuoyancyWaves::GetStepsPerSecond() const
 {
 	const FSimState* Sim = BenchSim();
 	return 1.0 / (Sim ? Sim->TickSeconds : FluidNinjaBuoyancyWaveRuntime::WaveDefaultTickSeconds);
+}
+
+UFluidNinjaBuoyancyWaves::FSimState* UFluidNinjaBuoyancyWaves::FindActiveSimAt(const FVector2D& WorldXY)
+{
+	return const_cast<FSimState*>(static_cast<const UFluidNinjaBuoyancyWaves*>(this)->FindActiveSimAt(WorldXY));
+}
+
+const UFluidNinjaBuoyancyWaves::FSimState* UFluidNinjaBuoyancyWaves::FindActiveSimAt(const FVector2D& WorldXY) const
+{
+	// The same choice Tick makes for the pokes, impulses and foam patches: the smallest running square holding the point.
+	const FSimState* Best = nullptr;
+	for (const FSimState& Sim : Sims)
+	{
+		if (Sim.bActive && FMath::Abs(WorldXY.X - Sim.Centre.X) < Sim.SizeCm * 0.5 && FMath::Abs(WorldXY.Y - Sim.Centre.Y) < Sim.SizeCm * 0.5
+			&& (!Best || Sim.SizeCm < Best->SizeCm))
+		{
+			Best = &Sim;
+		}
+	}
+	return Best;
+}
+
+double UFluidNinjaBuoyancyWaves::GetCellCmAt(const FVector2D& WorldXY) const
+{
+	const FSimState* Sim = FindActiveSimAt(WorldXY);
+	return Sim && Sim->CellCm > 0.0 ? Sim->CellCm : GetCellCm();
+}
+
+double UFluidNinjaBuoyancyWaves::GetStepsPerSecondAt(const FVector2D& WorldXY) const
+{
+	const FSimState* Sim = FindActiveSimAt(WorldXY);
+	return Sim && Sim->TickSeconds > 0.f ? 1.0 / Sim->TickSeconds : GetStepsPerSecond();
+}
+
+void UFluidNinjaBuoyancyWaves::AddRing(const FVector2D& WorldXY, float ImpulseDown, float RadiusCm)
+{
+	if (!bRunning || !FluidNinjaBuoyancyRings::IsOn() || !FMath::IsFinite(ImpulseDown) || ImpulseDown == 0.f || WorldXY.ContainsNaN())
+	{
+		return;
+	}
+	FSimState* Sim = FindActiveSimAt(WorldXY);
+	if (!Sim)
+	{
+		return;
+	}
+	if (!Sim->Rings)
+	{
+		Sim->Rings = MakeShared<FluidNinjaBuoyancyRings::FState>();
+	}
+	const UWorld* World = GetOwnerWorld();
+	Sim->Rings->Add(WorldXY, World ? World->GetTimeSeconds() : 0.0, ImpulseDown, RadiusCm);
+}
+
+void UFluidNinjaBuoyancyWaves::DumpRings() const
+{
+	for (const FSimState& Sim : Sims)
+	{
+		if (Sim.bActive && Sim.Rings && Sim.Rings->LogLut(Sim.Name))
+		{
+			return;
+		}
+	}
+	UE_LOG(LogFluidNinjaBuoyancy, Display, TEXT("FluidNinja Buoyancy rings dump: no running simulation has a ring response table yet (a simulation makes one with its first ring: Add Water Contact)."));
 }

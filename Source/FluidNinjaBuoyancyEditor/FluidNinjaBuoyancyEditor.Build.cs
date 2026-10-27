@@ -16,6 +16,8 @@ public class FluidNinjaBuoyancyEditor : ModuleRules
 		// shader map of NiagaraShader, a material resource compiled by hand through RenderCore / RHI). Editor-only; nothing of it
 		// reaches a cooked game.
 		PrivateDependencyModuleNames.AddRange(new[] { "Niagara", "NiagaraCore", "NiagaraShader", "NiagaraEditor", "RenderCore", "RHI" });
+		// Live-editor material compilation must use the editor's resource ownership/update context.
+		PrivateDependencyModuleNames.AddRange(new[] { "MaterialEditor" });
 		// FNBDevLibrary's Blueprint variable helpers (tooltips and ranges of member variables): the K2 schema's type names and metadata keys.
 		PrivateDependencyModuleNames.AddRange(new[] { "BlueprintGraph" });
 		// FNBDevLibrary's user parameter hierarchy helpers (the sections and categories a NinjaLive's User Parameters are grouped by).
