@@ -83,6 +83,7 @@ the rest still works.
    | Head | the head bone | 5 | 0.3 | 1 | off | 0 |
    | Beak | the beak's tip bone | 2.5 | 0.08 | 1 | off | 0 |
    | FootL / FootR | the toe bones, the point under the webbing | 5 | 0.12 | 1 | on | 0 |
+   | WingL / WingR (optional) | an outer-wing bone, the point among the primaries | 7 | 0.3 | 0 | off | 0 |
 
 4. **Body Part** names the body (default `Body`), and **Mass Kg** is the whole bird's mass at scale 1: together they give how high it
    floats and how fast it bobs.
@@ -117,7 +118,9 @@ Location** (Part) every frame; it must sit on the body part through the whole an
 | **Wake Edge Radius Cm** | The width of the edge that presses the wake in (cm at scale 1): a body's breast at the water line, far narrower than its sphere. The wake's rings take their band from it, so a 13 cm body sphere's wake comes out about ten times flatter than a 5 cm edge's (and a full ring table drops it first). 0: the part's Radius Cm. |
 
 The parts are spheres because a sphere's wet fraction and footprint follow from one number. A wing dragged along the water is a
-sphere of the wing's width placed at its middle, with the added mass of the water the wing moves.
+sphere of the wing's width placed at its middle, with the added mass of the water the wing moves. A wing whose beats bring its
+tips down onto the water (a bird stretching or beating its wings while floating) rings the water under it with a part on the
+outer wing: a radius of 7.5 cm or less keeps its rings crisp, and Splash Scale 0 gives rings without spray.
 
 ---
 
