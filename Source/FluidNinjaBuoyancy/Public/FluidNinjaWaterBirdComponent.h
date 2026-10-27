@@ -66,6 +66,22 @@ struct FLUIDNINJABUOYANCY_API FFluidNinjaWaterBirdPart
 	 * wide source). 0-200. Default 0. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "200", Units = "cm", EditCondition = "bWake"))
 	float WakeEdgeRadiusCm = 0.f;
+
+	/** The downwash: a part beating down towards the water (a wing) disturbs it through the air before, or without, touching it. While the
+	 * part's sphere is clear of the water and moving down with its bottom within this height of the surface (cm, at actor scale 1; it scales
+	 * with the actor), the air it drives down presses on the water under it: air density x Air Area Cm2 x its speed down squared, over the
+	 * time, fading to nothing at this height as (1 - height / reach)^2. It shows as a patch of fine ripples, no spray, about a tenth of what
+	 * the same beat would hand the water by hitting it. About the wing's width: a pelican's wing, 30. 0 (the default): no downwash.
+	 * 0-200. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "200", Units = "cm"))
+	float AirReachCm = 0.f;
+
+	/** The wing area that drives the air down in the downwash (cm2, at actor scale 1; it scales with the scale's square): the push grows with
+	 * it, and its ripples are spread over a patch of the same area under the part. The whole wing beats the air down, so use the wing's
+	 * area even when the part sits on its outer half: a brown pelican's wing is about 2500 (3.5 kg on about 0.58 m2 of wings). Larger: a
+	 * stronger, wider patch. 0-20000. Default 1000. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird", meta = (ClampMin = "0", ClampMax = "20000", EditCondition = "AirReachCm > 0"))
+	float AirAreaCm2 = 1000.f;
 };
 
 /**
@@ -90,7 +106,7 @@ public:
 	UFluidNinjaWaterBirdComponent();
 
 	/** The parts that touch the water: a sphere on a bone each (Name, Bone, Reference Point, Radius Cm, Added Mass Kg, Splash Scale, Wake,
-	 * Wake Edge Radius Cm).
+	 * Wake Edge Radius Cm, Air Reach Cm, Air Area Cm2).
 	 * Read when the mesh is bound (Begin Play, a new Mesh or mesh asset, a change in their number) and when contacts are switched on, so set
 	 * them before then. Empty: the component does nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Water Bird")
@@ -237,7 +253,7 @@ public:
 	float GetHeaveFrequencyHz() const;
 
 	/** For QA: a JSON object with the counters (water_contacts on/off, water_entries, water_exits, contacts, splashes, plunges,
-	 * splashes_held_back, water_readback_fallbacks, impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth
+	 * splashes_held_back, air_pushes, water_readback_fallbacks, impulse_abs_sum_kg_cm_s), the parts' names and, per part in the same order, its depth now, its deepest depth
 	 * since Reset Peak Depths (cm; -10000 when not measured), its wet fraction and its speed at its last entry (cm/s; 0: none yet), then the
 	 * floating body's height above the water and the heave frequency. */
 	UFUNCTION(BlueprintPure, Category = "Water Bird")
@@ -298,8 +314,11 @@ private:
 		/** Momentum handed to the water and not sent yet (kg·cm/s, down positive), and the wake's. */
 		float Pending = 0.f;
 		float PendingWake = 0.f;
+		/** The downwash's push gathered and not sent yet (kg·cm/s, down positive). */
+		float PendingAir = 0.f;
 		float SinceSent = 0.f;
 		float SinceWakeSent = 0.f;
+		float SinceAirSent = 0.f;
 		bool bInitialized = false;
 		/** Momentum holds a measured value (the frame before had a speed): only then is its change handed over. */
 		bool bHasMomentum = false;
@@ -357,6 +376,8 @@ private:
 	int32 Plunges = 0;
 	/** Splashes the parts would have thrown, held back around a dive (Plunge Quiet Seconds, the body diving in behind them). */
 	int32 HeldBack = 0;
+	/** Downwash patches sent (Air Reach Cm), since Begin Play. */
+	int32 AirPushes = 0;
 	int32 ReadbackFallbacks = 0;
 	double ImpulseAbsSum = 0.0;
 };

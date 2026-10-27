@@ -31,6 +31,12 @@ namespace FluidNinjaWaterBird
 	constexpr float ExitSplashShare = 0.35f;
 	/** A splash weaker than this is not drawn (the floating bodies' and the swimmers' rule; Add Water Contact spawns any strength above 0). */
 	constexpr float SmallestSplash = 0.2f;
+	/** Air in the plugin's units (kg/cm3), at sea level and 20 C. */
+	constexpr double AirDensityKgCm3 = 1.2e-6;
+	/** A downwash push is spread over this many points of its patch, each a fine ripple this wide (cm, at scale 1): a gust's patch of short
+	 * ripples rather than one ring. */
+	constexpr int32 AirPatchPoints = 3;
+	constexpr float AirRippleRadiusCm = 4.f;
 
 	/** The volume of a sphere's cap Height deep: pi h2 (3 R - h) / 3. */
 	double CapVolume(double Radius, double Height)
@@ -349,6 +355,7 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 		State.bInitialized = true;
 		State.SinceSent += DeltaSeconds;
 		State.SinceWakeSent += DeltaSeconds;
+		State.SinceAirSent += DeltaSeconds;
 
 		// The water's vertical momentum the part carries with it: its added mass, as much of it as is wet, at its speed down. Its change is
 		// what the part hands the water: going in presses it down, slowing under it or coming up pulls it back. A frame without a speed (the
@@ -381,6 +388,20 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 			if (Along.SizeSquared() > 1.0)
 			{
 				State.WakeDirection = Along.GetSafeNormal();
+			}
+		}
+
+		// Clear of the water and coming down within Air Reach Cm of it (a wing beating towards it), the part drives air onto the water under
+		// it: the momentum flux of the air it pushes, air density x Air Area x v_z2 over the frame, fading to nothing at the reach.
+		if (Part.AirReachCm > 0.f && Part.AirAreaCm2 > 0.f && bMoving && Wet <= 0.f && Velocity.Z < 0.0)
+		{
+			const float AirReach = Part.AirReachCm * Scale;
+			const float Height = FMath::Max(-Depth - Radius, 0.f);   // the sphere's bottom above the surface
+			if (Height < AirReach)
+			{
+				const float Fade = FMath::Square(1.f - Height / AirReach);
+				const double Area = static_cast<double>(Part.AirAreaCm2) * Scale * Scale;
+				State.PendingAir += static_cast<float>(FluidNinjaWaterBird::AirDensityKgCm3 * Area * FMath::Square(Velocity.Z) * DeltaSeconds) * Fade;
 			}
 		}
 
@@ -458,6 +479,22 @@ void UFluidNinjaWaterBirdComponent::UpdateContacts(float DeltaSeconds)
 			Send(*Subsystem, Position + State.WakeDirection * Radius, Water.SurfaceZ, Water.Normal, WakeWidth, State.PendingWake, 0.f, 0.f);
 			State.PendingWake = 0.f;
 			State.SinceWakeSent = 0.f;
+		}
+		// The downwash at most every Ring Interval Seconds, spread over a patch of the wing's area under the part, as fine ripples.
+		if (State.SinceAirSent >= RingIntervalSeconds && State.PendingAir >= FluidNinjaWaterBird::MinImpulseKgCmS * FluidNinjaWaterBird::AirPatchPoints)
+		{
+			const float PatchRadius = FMath::Sqrt(Part.AirAreaCm2 / PI) * Scale;
+			const float Share = State.PendingAir / FluidNinjaWaterBird::AirPatchPoints;
+			for (int32 Point = 0; Point < FluidNinjaWaterBird::AirPatchPoints; ++Point)
+			{
+				const float Angle = FMath::FRand() * UE_TWO_PI;
+				const float Distance = PatchRadius * FMath::Sqrt(FMath::FRand());
+				const FVector Where = Position + FVector(Distance * FMath::Cos(Angle), Distance * FMath::Sin(Angle), 0.0);
+				Send(*Subsystem, Where, Water.SurfaceZ, Water.Normal, FluidNinjaWaterBird::AirRippleRadiusCm * Scale, Share, 0.f, 0.f);
+			}
+			++AirPushes;
+			State.PendingAir = 0.f;
+			State.SinceAirSent = 0.f;
 		}
 	}
 }
@@ -590,9 +627,9 @@ FString UFluidNinjaWaterBirdComponent::GetDiagnostics() const
 		EntrySpeedList += Separator + FluidNinjaWaterBird::JsonNumber(EntrySpeeds.IsValidIndex(Index) ? EntrySpeeds[Index] : 0.f);
 	}
 	return FString::Printf(TEXT("{\"water_contacts\":%s,\"water_entries\":%d,\"water_exits\":%d,\"contacts\":%d,\"splashes\":%d,\"plunges\":%d,")
-		TEXT("\"splashes_held_back\":%d,\"water_readback_fallbacks\":%d,\"impulse_abs_sum_kg_cm_s\":%s,\"part_names\":[%s],\"depth_cm\":[%s],")
+		TEXT("\"splashes_held_back\":%d,\"air_pushes\":%d,\"water_readback_fallbacks\":%d,\"impulse_abs_sum_kg_cm_s\":%s,\"part_names\":[%s],\"depth_cm\":[%s],")
 		TEXT("\"peak_depth_cm\":[%s],\"wet_fraction\":[%s],\"entry_speed_cm_s\":[%s],\"float_body_above_water_cm\":%s,\"heave_frequency_hz\":%s}"),
-		bContactsEnabled ? TEXT("true") : TEXT("false"), Entries, Exits, Contacts, Splashes, Plunges, HeldBack, ReadbackFallbacks,
+		bContactsEnabled ? TEXT("true") : TEXT("false"), Entries, Exits, Contacts, Splashes, Plunges, HeldBack, AirPushes, ReadbackFallbacks,
 		*FluidNinjaWaterBird::JsonNumber(ImpulseAbsSum), *Names, *DepthList, *PeakList, *WetList, *EntrySpeedList,
 		*FluidNinjaWaterBird::JsonNumber(GetFloatBodyAboveWaterCm()), *FluidNinjaWaterBird::JsonNumber(GetHeaveFrequencyHz()));
 }
