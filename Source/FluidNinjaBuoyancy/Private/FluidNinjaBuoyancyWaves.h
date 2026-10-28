@@ -269,6 +269,10 @@ public:
 	 * without the WaveHeightScale scalar, or a simulation FluidNinja Buoyancy's waves do not run): the mirror then changes every frame, and
 	 * fnb.Capture.OnChange redraws it every frame too. Set by SetMirrorWavesHidden(true, ...). */
 	bool IsMirrorStill() const { return bMirrorStill; }
+	/** Before a capture, without touching any material: whether a mirror of these surfaces could hold still. True when waves run and every
+	 * surface either lies under no FluidNinja simulation or lies under a running one and has a dynamic material with WaveHeightScale (so its
+	 * waves would be hidden). A surface under a simulation our waves do not run, or without the scalar, would show waves: false. */
+	bool CanMirrorHoldStill(const TArray<const UPrimitiveComponent*>& Surfaces) const;
 	/** The body's simulation's B and its own field's tile for the gather; false when it feels no waves (no own field yet, waves off). */
 	bool GetGatherSlot(int32 BodyId, FFluidNinjaWaveGatherSlot& Out) const;
 	/** The self-field atlas the gather reads B_self from (null before any body has a field). */

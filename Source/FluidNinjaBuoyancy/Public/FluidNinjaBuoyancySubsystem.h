@@ -684,6 +684,9 @@ protected:
 	 * with their reach, the near plane is within tolerance, the surface pieces in the square are the same and where they were, and it is
 	 * younger than fnb.Capture.MaxAgeSeconds). False sets OutReason (the status line). */
 	bool MirrorStillServes(const FVector2D& Desired, double Half, double Texel, double Now, const TCHAR*& OutReason) const;
+	/** fnb.Capture.OnChange applies here: it is on, and a mirror of the surfaces in the square at Desired would hold still (no simulation's waves
+	 * drawn in it). Else the old cadence (every frame or fnb.Capture.EveryNFrames, drawing only the pieces under bodies). Cached half a second. */
+	bool MirrorCanHoldStill(const FVector2D& Desired, double Half, double Now);
 	int32 CopyFootprints(const TArray<FFootprint>& Wanted, double Now);
 	/** The importance scheduler and the gather dispatch: which of the bodies the capture serves are gathered this frame (their level of
 	 * detail's cadence, the per-frame budget, nearest and fastest first, never past Max Extrapolation Seconds while the budget allows),
@@ -836,6 +839,12 @@ protected:
 	int32 CapturesThisSecond = 0;
 	double NextCaptureCount = 0.0;
 	const TCHAR* LastCaptureReason = TEXT("");
+	/** The last redraw drew the whole square (fnb.Capture.OnChange in effect), so it can be kept while the bodies move inside it. */
+	bool bLastCaptureWholeSquare = false;
+	/** MirrorCanHoldStill's answer, when it is next looked at again and the square it was for. */
+	bool bCanHoldStill = false;
+	double NextStillCheck = 0.0;
+	FVector2D StillCheckOrigin = FVector2D::ZeroVector;
 
 	// The simulation FluidNinja's material parameter collection places (one following the player, such as the river template).
 	FVector2D SimCentre = FVector2D::ZeroVector;

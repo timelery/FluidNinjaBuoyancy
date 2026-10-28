@@ -248,9 +248,10 @@ namespace
 		ECVF_Scalability);
 	int32 CaptureEveryNFrames = 1;
 	FAutoConsoleVariableRef CVarCaptureEveryNFrames(TEXT("fnb.Capture.EveryNFrames"), CaptureEveryNFrames,
-		TEXT("Only with fnb.Capture.OnChange 0: the Surface Mirror (the depth capture of the drawn water) is redrawn every this many frames; between redraws the bodies' ")
-		TEXT("water is gathered from the last one, whose square and near plane are kept, so the water's rate comes in steps. 1 (or less, the default): every frame. Set by ")
-		TEXT("sg.WaterQuality (3 / 2 / 1 / 1 / 1, Low to Cinematic). With fnb.Capture.OnChange 1 (the default) it is not used: the mirror is redrawn when it would change."),
+		TEXT("With fnb.Capture.OnChange 0, or where the mirror cannot hold still (a drawn surface shows a simulation's waves): the Surface Mirror (the depth capture of ")
+		TEXT("the drawn water) is redrawn every this many frames; between redraws the bodies' water is gathered from the last one, whose square and near plane are kept, ")
+		TEXT("so the water's rate comes in steps. 1 (or less, the default): every frame. Set by sg.WaterQuality (3 / 2 / 1 / 1 / 1, Low to Cinematic). Where ")
+		TEXT("fnb.Capture.OnChange applies it is not used: the mirror is redrawn when it would change."),
 		ECVF_Scalability);
 
 	/** fnb.Capture.OnChange, fnb.Capture.MaxAgeSeconds and fnb.Capture.MoveToleranceCm: the Surface Mirror is a full scene render of its own (about 1-3 ms of the
@@ -262,9 +263,10 @@ namespace
 		TEXT("must move (a body rose by more than half of Near Plane Above Bodies Cm, or all sank by more than all of it), a surface piece in the square appeared, went, ")
 		TEXT("was hidden or moved (beyond fnb.Capture.MoveToleranceCm, or turned or scaled at all), or it is older than fnb.Capture.MaxAgeSeconds. Each redraw draws every ")
 		TEXT("surface piece in the square, so bodies may move anywhere inside it. 0: the old cadence, every frame or every fnb.Capture.EveryNFrames frames, drawing only ")
-		TEXT("the pieces under some body. Set 0 to compare, or where the drawn water itself animates quickly without FluidNinja Waves (its height is then only as fresh ")
-		TEXT("as fnb.Capture.MaxAgeSeconds). The status line (fnb.Buoyancy 2) shows the redraws a second and the last reason; the CSV profiler's FNB/MirrorRedraws ")
-		TEXT("is 1 on a frame it was redrawn."),
+		TEXT("the pieces under some body. Where a drawn surface would show a simulation's waves (FluidNinja Buoyancy's waves off or not running for that simulation, ")
+		TEXT("or a surface without the WaveHeightScale scalar), the old cadence is kept there automatically. Set 0 to compare. The drawn water's own slow movement ")
+		TEXT("(FluidNinja's tile displacement) is then only as fresh as fnb.Capture.MaxAgeSeconds. The status line (fnb.Buoyancy 2) shows the redraws a second and ")
+		TEXT("the last reason; the CSV profiler's FNB/MirrorRedraws is 1 on a frame it was redrawn."),
 		ECVF_Default);
 	float CaptureMaxAgeSeconds = 0.25f;
 	FAutoConsoleVariableRef CVarCaptureMaxAgeSeconds(TEXT("fnb.Capture.MaxAgeSeconds"), CaptureMaxAgeSeconds,
@@ -2734,10 +2736,6 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	const int32 Resolution = FMath::Clamp(FMath::RoundToInt32(Settings.CaptureResolution * FMath::Max(CaptureScale, 0.01f)), 64, 4096);
 	const double Texel = Width / Resolution;
 	const bool bHaveCapture = Capture && CaptureTarget && CaptureResolution == Resolution && CaptureTexel > 0.0;
-	// fnb.Capture.OnChange: redrawn only when the last mirror no longer serves (MirrorStillServes, below); else the old cadence.
-	const bool bOnChange = CaptureOnChange != 0;
-	bool bCaptureDue = !bHaveCapture || (!bOnChange && (CaptureEveryNFrames <= 1 || (GFrameCounter % static_cast<uint64>(CaptureEveryNFrames)) == 0));
-	const TCHAR* Reason = bHaveCapture ? TEXT("cadence") : TEXT("first");
 	if (Now >= NextCaptureCount)
 	{
 		NextCaptureCount = Now + 1.0;
@@ -2797,9 +2795,16 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	// Between redraws the bodies are judged against the square the last capture was drawn over.
 	const FVector2D Desired(FMath::RoundToDouble(Centre.X / Texel) * Texel, FMath::RoundToDouble(Centre.Y / Texel) * Texel);
 	const double Half = Width * 0.5;
-	if (bOnChange && !bCaptureDue)
+	// fnb.Capture.OnChange, where the mirror can hold still (MirrorCanHoldStill): redrawn only when the last one no longer serves
+	// (MirrorStillServes), drawing the whole square. Elsewhere, and with fnb.Capture.OnChange 0, the old cadence: every frame or every
+	// fnb.Capture.EveryNFrames frames, drawing only the pieces under some body.
+	const bool bOnChange = MirrorCanHoldStill(Desired, Half, Now);
+	const TCHAR* Reason = bHaveCapture ? TEXT("cadence") : TEXT("first");
+	bool bCaptureDue = !bHaveCapture;
+	if (!bCaptureDue)
 	{
-		bCaptureDue = !MirrorStillServes(Desired, Half, Texel, Now, Reason);
+		bCaptureDue = bOnChange ? !MirrorStillServes(Desired, Half, Texel, Now, Reason)
+			: CaptureEveryNFrames <= 1 || (GFrameCounter % static_cast<uint64>(CaptureEveryNFrames)) == 0;
 	}
 	const FVector2D Origin = bCaptureDue ? Desired : CaptureOrigin;
 
@@ -2983,6 +2988,7 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		CaptureResolution = Resolution;
 		CaptureTime = Now;
 		LastCaptureReason = Reason;
+		bLastCaptureWholeSquare = bOnChange;
 		++CapturesThisSecond;
 	}
 
@@ -3038,7 +3044,8 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		TEXT("  cost: game thread %.2f ms (patches %.2f), physics pre-tick %.2f ms, physics thread %.2f ms a frame (%.3f a step)"),
 		*FluidNinjaBuoyancyQuality::Describe(), Width / 100.0, Resolution, Texel,
 		bOnChange ? *FString::Printf(TEXT(" on change (%d redraws in the last second, last: %s)"), CapturesLastSecond, LastCaptureReason)
-			: CaptureEveryNFrames > 1 ? *FString::Printf(TEXT(" every %d frames"), CaptureEveryNFrames) : TEXT(""),
+			: *FString::Printf(TEXT("%s%s"), CaptureOnChange != 0 ? TEXT(" (not on change: waves would be drawn in it)") : TEXT(""),
+				CaptureEveryNFrames > 1 ? *FString::Printf(TEXT(" every %d frames"), CaptureEveryNFrames) : TEXT("")),
 		CaptureTop, SurfacePrimitives.Num(), LastCapturedPrimitives, SurfaceLeftOut, *Mode, PatchesBuilt, LastWakePoints,
 		LastBodiesByLevel[0], LastBodiesByLevel[1], LastBodiesByLevel[2], LastMemoryMB,
 		*Sims, Settings.FlowScaleMultiplier,
@@ -3051,11 +3058,44 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	}
 }
 
+bool UFluidNinjaBuoyancySubsystem::MirrorCanHoldStill(const FVector2D& Desired, double Half, double Now)
+{
+	// fnb.Capture.OnChange only where a mirror of the square's surfaces would hold still (UFluidNinjaBuoyancyWaves::CanMirrorHoldStill: no
+	// simulation's waves drawn in it). Looked at twice a second, or at once when the square moved by a quarter of its width.
+	if (CaptureOnChange == 0 || !Waves)
+	{
+		return false;
+	}
+	if (Now < NextStillCheck && FVector2D::DistSquared(StillCheckOrigin, Desired) < FMath::Square(Half * 0.5))
+	{
+		return bCanHoldStill;
+	}
+	NextStillCheck = Now + 0.5;
+	StillCheckOrigin = Desired;
+	const FBox2D Square(Desired - FVector2D(Half), Desired + FVector2D(Half));
+	TArray<const UPrimitiveComponent*> InSquare;
+	for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : SurfacePrimitives)
+	{
+		const UPrimitiveComponent* Primitive = Weak.Get();
+		if (Primitive && Square.Intersect(FBox2D(FVector2D(Primitive->Bounds.GetBox().Min), FVector2D(Primitive->Bounds.GetBox().Max))))
+		{
+			InSquare.Add(Primitive);
+		}
+	}
+	bCanHoldStill = Waves->CanMirrorHoldStill(InSquare);
+	return bCanHoldStill;
+}
+
 bool UFluidNinjaBuoyancySubsystem::MirrorStillServes(const FVector2D& Desired, double Half, double Texel, double Now, const TCHAR*& OutReason) const
 {
 	// fnb.Capture.OnChange: the last Surface Mirror is kept while everything it shows and everything the bodies need from it is as it was
 	// when it was drawn. Its own drawn water (FluidNinja's surface W, the waves left out) is only as fresh as fnb.Capture.MaxAgeSeconds.
 	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
+	if (!bLastCaptureWholeSquare)
+	{
+		OutReason = TEXT("the last one drew only the pieces under bodies");
+		return false;
+	}
 	if (CaptureTime < 0.0 || Now - CaptureTime >= FMath::Min(CaptureMaxAgeSeconds, 2.f))
 	{
 		OutReason = TEXT("age");

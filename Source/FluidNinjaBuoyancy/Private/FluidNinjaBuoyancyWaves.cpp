@@ -2789,6 +2789,45 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 	}
 }
 
+bool UFluidNinjaBuoyancyWaves::CanMirrorHoldStill(const TArray<const UPrimitiveComponent*>& Surfaces) const
+{
+	const FName Parameter = UFluidNinjaBuoyancySettings::Get().WaveHeightScaleParameter;
+	if (!IsActive() || Parameter.IsNone())
+	{
+		return false;
+	}
+	TArray<UMaterialInterface*> Used;
+	for (const UPrimitiveComponent* Primitive : Surfaces)
+	{
+		const FVector2D At(Primitive->Bounds.Origin);
+		const FSimState* Under = Sims.FindByPredicate([&At](const FSimState& Sim)
+		{
+			return FMath::Abs(At.X - Sim.Centre.X) < Sim.SizeCm * 0.5 && FMath::Abs(At.Y - Sim.Centre.Y) < Sim.SizeCm * 0.5;
+		});
+		if (!Under)
+		{
+			continue;   // under no simulation: its drawn water does not move
+		}
+		if (!Under->bActive)
+		{
+			return false;   // a simulation our waves do not run (off, or ranked out by fnb.Waves.MaxActiveSims): its own waves may be drawn
+		}
+		Used.Reset();
+		Primitive->GetUsedMaterials(Used);
+		const bool bHides = Used.ContainsByPredicate([&Parameter](UMaterialInterface* Interface)
+		{
+			const UMaterialInstanceDynamic* Material = Cast<UMaterialInstanceDynamic>(Interface);
+			float Value = 0.f;
+			return Material && Material->GetScalarParameterValue(FHashedMaterialParameterInfo(Parameter), Value);
+		});
+		if (!bHides)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool UFluidNinjaBuoyancyWaves::GetGatherSlot(int32 BodyId, FFluidNinjaWaveGatherSlot& Out) const
 {
 	const FBodyState* Body = Bodies.Find(BodyId);
