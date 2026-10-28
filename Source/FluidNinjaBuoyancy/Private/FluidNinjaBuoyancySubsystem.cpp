@@ -9,6 +9,7 @@
 #include "Engine/CollisionProfile.h"
 #include "Engine/Engine.h"
 #include "Engine/SceneCapture2D.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -247,10 +248,37 @@ namespace
 		ECVF_Scalability);
 	int32 CaptureEveryNFrames = 1;
 	FAutoConsoleVariableRef CVarCaptureEveryNFrames(TEXT("fnb.Capture.EveryNFrames"), CaptureEveryNFrames,
-		TEXT("The Surface Mirror (the depth capture of the drawn water) is redrawn every this many frames; between redraws the bodies' water is gathered from the last one, ")
-		TEXT("whose square and near plane are kept, so the water's rate comes in steps. 1 (or less, the default): every frame. Set by sg.WaterQuality (3 / 2 / 1 / 1 / 1, ")
-		TEXT("Low to Cinematic)."),
+		TEXT("Only with fnb.Capture.OnChange 0: the Surface Mirror (the depth capture of the drawn water) is redrawn every this many frames; between redraws the bodies' ")
+		TEXT("water is gathered from the last one, whose square and near plane are kept, so the water's rate comes in steps. 1 (or less, the default): every frame. Set by ")
+		TEXT("sg.WaterQuality (3 / 2 / 1 / 1 / 1, Low to Cinematic). With fnb.Capture.OnChange 1 (the default) it is not used: the mirror is redrawn when it would change."),
 		ECVF_Scalability);
+
+	/** fnb.Capture.OnChange, fnb.Capture.MaxAgeSeconds and fnb.Capture.MoveToleranceCm: the Surface Mirror is a full scene render of its own (about 1-3 ms of the
+	 * render thread and 0.5-1 ms of GPU), and the drawn water under the bodies rarely changes from one frame to the next (the waves the bodies ride are left out of
+	 * it and read from the simulation every frame), so by default it is redrawn only when the last one no longer serves (MirrorStillServes). */
+	int32 CaptureOnChange = 1;
+	FAutoConsoleVariableRef CVarCaptureOnChange(TEXT("fnb.Capture.OnChange"), CaptureOnChange,
+		TEXT("1 (the default): the Surface Mirror is redrawn only when the last one no longer serves: a body would leave its square (it then recentres), the near plane ")
+		TEXT("must move (a body rose by more than half of Near Plane Above Bodies Cm, or all sank by more than all of it), a surface piece in the square appeared, went, ")
+		TEXT("was hidden or moved (beyond fnb.Capture.MoveToleranceCm, or turned or scaled at all), or it is older than fnb.Capture.MaxAgeSeconds. Each redraw draws every ")
+		TEXT("surface piece in the square, so bodies may move anywhere inside it. 0: the old cadence, every frame or every fnb.Capture.EveryNFrames frames, drawing only ")
+		TEXT("the pieces under some body. Set 0 to compare, or where the drawn water itself animates quickly without FluidNinja Waves (its height is then only as fresh ")
+		TEXT("as fnb.Capture.MaxAgeSeconds). The status line (fnb.Buoyancy 2) shows the redraws a second and the last reason; the CSV profiler's FNB/MirrorRedraws ")
+		TEXT("is 1 on a frame it was redrawn."),
+		ECVF_Default);
+	float CaptureMaxAgeSeconds = 0.25f;
+	FAutoConsoleVariableRef CVarCaptureMaxAgeSeconds(TEXT("fnb.Capture.MaxAgeSeconds"), CaptureMaxAgeSeconds,
+		TEXT("With fnb.Capture.OnChange 1: the longest the Surface Mirror is kept while bodies use it, in seconds. It bounds how stale a slow change nothing else detects ")
+		TEXT("can get (FluidNinja's own drawn surface moving, a material parameter on the water, a water level animating). Default 0.25 (four redraws a second at rest). ")
+		TEXT("Lower is fresher and costs more (0: every frame, as with fnb.Capture.OnChange 0 but drawing the whole square); higher saves more where the water is still. ")
+		TEXT("Sensible range 0.1-1; values above 2 count as 2."),
+		ECVF_Default);
+	float CaptureMoveToleranceCm = 100.f;
+	FAutoConsoleVariableRef CVarCaptureMoveToleranceCm(TEXT("fnb.Capture.MoveToleranceCm"), CaptureMoveToleranceCm,
+		TEXT("With fnb.Capture.OnChange 1: how far a drawn surface piece may move since the last redraw before the Surface Mirror is redrawn, in cm (a water sheet or ")
+		TEXT("simulation window that follows the player moves in small steps; inside it the drawn water is the same). Default 100. 0: any move redraws (exact, but a ")
+		TEXT("following window then redraws on most frames while the player travels). A turn or a change of scale always redraws. Sensible range 0-500."),
+		ECVF_Default);
 
 	/** fnb.Lod.*: the distances every body's Lod Distances Cm and Sleep Distance Cm stand for are scaled, and the hull's level of detail is
 	 * pushed Bias levels coarser (UpdateLevelAndSleep). */
@@ -2706,7 +2734,16 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	const int32 Resolution = FMath::Clamp(FMath::RoundToInt32(Settings.CaptureResolution * FMath::Max(CaptureScale, 0.01f)), 64, 4096);
 	const double Texel = Width / Resolution;
 	const bool bHaveCapture = Capture && CaptureTarget && CaptureResolution == Resolution && CaptureTexel > 0.0;
-	const bool bCaptureDue = !bHaveCapture || CaptureEveryNFrames <= 1 || (GFrameCounter % static_cast<uint64>(CaptureEveryNFrames)) == 0;
+	// fnb.Capture.OnChange: redrawn only when the last mirror no longer serves (MirrorStillServes, below); else the old cadence.
+	const bool bOnChange = CaptureOnChange != 0;
+	bool bCaptureDue = !bHaveCapture || (!bOnChange && (CaptureEveryNFrames <= 1 || (GFrameCounter % static_cast<uint64>(CaptureEveryNFrames)) == 0));
+	const TCHAR* Reason = bHaveCapture ? TEXT("cadence") : TEXT("first");
+	if (Now >= NextCaptureCount)
+	{
+		NextCaptureCount = Now + 1.0;
+		CapturesLastSecond = CapturesThisSecond;
+		CapturesThisSecond = 0;
+	}
 	FVector2D Centre = SimCentre;
 	if (!bSimValid)
 	{
@@ -2758,8 +2795,13 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		}
 	}
 	// Between redraws the bodies are judged against the square the last capture was drawn over.
-	const FVector2D Origin = bCaptureDue ? FVector2D(FMath::RoundToDouble(Centre.X / Texel) * Texel, FMath::RoundToDouble(Centre.Y / Texel) * Texel) : CaptureOrigin;
+	const FVector2D Desired(FMath::RoundToDouble(Centre.X / Texel) * Texel, FMath::RoundToDouble(Centre.Y / Texel) * Texel);
 	const double Half = Width * 0.5;
+	if (bOnChange && !bCaptureDue)
+	{
+		bCaptureDue = !MirrorStillServes(Desired, Half, Texel, Now, Reason);
+	}
+	const FVector2D Origin = bCaptureDue ? Desired : CaptureOrigin;
 
 	// Which bodies it serves, the footprint each needs, and how high its near plane must be.
 	TArray<FFootprint> Wanted;
@@ -2872,16 +2914,25 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		}
 		USceneCaptureComponent2D* Component = Capture->GetCaptureComponent2D();
 		// Only the surface pieces under some body's footprint are drawn (at their finest level of detail, so the rest of the water
-		// would cost the GPU for nothing).
+		// would cost the GPU for nothing). With fnb.Capture.OnChange every piece in the square is drawn: the mirror is then kept while the
+		// bodies move anywhere inside it.
 		TArray<FBox2D, TInlineAllocator<16>> Reaches;
-		for (const FFootprint& Want : Wanted)
+		if (!bOnChange)
 		{
-			const UPrimitiveComponent* Primitive = Want.Slot->Component->GetSimulatedPrimitive();
-			const double Reach = Primitive->Bounds.SphereRadius + Want.Margin + MaxLeadCm + 4.0 * Texel;
-			const FVector2D Middle = Want.Area.GetCenter();
-			Reaches.Add(FBox2D(Middle - FVector2D(Reach), Middle + FVector2D(Reach)));
+			for (const FFootprint& Want : Wanted)
+			{
+				const UPrimitiveComponent* Primitive = Want.Slot->Component->GetSimulatedPrimitive();
+				const double Reach = Primitive->Bounds.SphereRadius + Want.Margin + MaxLeadCm + 4.0 * Texel;
+				const FVector2D Middle = Want.Area.GetCenter();
+				Reaches.Add(FBox2D(Middle - FVector2D(Reach), Middle + FVector2D(Reach)));
+			}
 		}
+		const FBox2D Square(Origin - FVector2D(Half), Origin + FVector2D(Half));
 		Component->ShowOnlyComponents.Reset();
+		CapturedSurfaces.Reset();
+		// Nanite's passes run only when a drawn piece is Nanite: a static mesh with Nanite data, or anything that is neither a static mesh nor
+		// a Niagara system (Niagara's mesh renderer draws no Nanite). The Nanite raster set-up is most of a capture of plain water meshes.
+		bool bAnyNanite = false;
 		for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : SurfacePrimitives)
 		{
 			const UPrimitiveComponent* Primitive = Weak.Get();
@@ -2891,11 +2942,21 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 			}
 			const FBox Box = Primitive->Bounds.GetBox();
 			const FBox2D Flat(FVector2D(Box.Min), FVector2D(Box.Max));
-			if (Reaches.ContainsByPredicate([&Flat](const FBox2D& Reach) { return Reach.Intersect(Flat); }))
+			if (bOnChange ? Square.Intersect(Flat) : Reaches.ContainsByPredicate([&Flat](const FBox2D& Reach) { return Reach.Intersect(Flat); }))
 			{
 				Component->ShowOnlyComponents.Add(Weak);
+				CapturedSurfaces.Add({Weak, Primitive->GetComponentTransform(), Primitive->IsVisible()});
+				if (const UStaticMeshComponent* Mesh = Cast<UStaticMeshComponent>(Primitive))
+				{
+					bAnyNanite = bAnyNanite || (Mesh->GetStaticMesh() && Mesh->GetStaticMesh()->HasValidNaniteData());
+				}
+				else if (!Primitive->IsA<UNiagaraComponent>())
+				{
+					bAnyNanite = true;
+				}
 			}
 		}
+		Component->ShowFlags.SetNaniteMeshes(bAnyNanite);
 		LastCapturedPrimitives = Component->ShowOnlyComponents.Num();
 		Capture->SetActorLocationAndRotation(FVector(Origin.X, Origin.Y, Top), FRotator(-90.0, 0.0, 0.0));
 		Component->OrthoWidth = static_cast<float>(Width);
@@ -2920,6 +2981,9 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		CaptureRange = Range;
 		CaptureTexel = Texel;
 		CaptureResolution = Resolution;
+		CaptureTime = Now;
+		LastCaptureReason = Reason;
+		++CapturesThisSecond;
 	}
 
 	// Each body's water out of the capture and the velocity buffer: all in one pass, or copied body by body.
@@ -2972,7 +3036,9 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 		TEXT("%s (flow multiplier %.2f)\n")
 		TEXT("  wind %.1f m/s toward %.0f deg (%s)%s\n")
 		TEXT("  cost: game thread %.2f ms (patches %.2f), physics pre-tick %.2f ms, physics thread %.2f ms a frame (%.3f a step)"),
-		*FluidNinjaBuoyancyQuality::Describe(), Width / 100.0, Resolution, Texel, CaptureEveryNFrames > 1 ? *FString::Printf(TEXT(" every %d frames"), CaptureEveryNFrames) : TEXT(""),
+		*FluidNinjaBuoyancyQuality::Describe(), Width / 100.0, Resolution, Texel,
+		bOnChange ? *FString::Printf(TEXT(" on change (%d redraws in the last second, last: %s)"), CapturesLastSecond, LastCaptureReason)
+			: CaptureEveryNFrames > 1 ? *FString::Printf(TEXT(" every %d frames"), CaptureEveryNFrames) : TEXT(""),
 		CaptureTop, SurfacePrimitives.Num(), LastCapturedPrimitives, SurfaceLeftOut, *Mode, PatchesBuilt, LastWakePoints,
 		LastBodiesByLevel[0], LastBodiesByLevel[1], LastBodiesByLevel[2], LastMemoryMB,
 		*Sims, Settings.FlowScaleMultiplier,
@@ -2983,6 +3049,117 @@ void UFluidNinjaBuoyancySubsystem::CaptureAndCopy()
 	{
 		Status += TEXT("\n  ") + CalibrationReport;
 	}
+}
+
+bool UFluidNinjaBuoyancySubsystem::MirrorStillServes(const FVector2D& Desired, double Half, double Texel, double Now, const TCHAR*& OutReason) const
+{
+	// fnb.Capture.OnChange: the last Surface Mirror is kept while everything it shows and everything the bodies need from it is as it was
+	// when it was drawn. Its own drawn water (FluidNinja's surface W, the waves left out) is only as fresh as fnb.Capture.MaxAgeSeconds.
+	const UFluidNinjaBuoyancySettings& Settings = UFluidNinjaBuoyancySettings::Get();
+	if (CaptureTime < 0.0 || Now - CaptureTime >= FMath::Min(CaptureMaxAgeSeconds, 2.f))
+	{
+		OutReason = TEXT("age");
+		return false;
+	}
+	// Only a mirror without waves in it holds still: with FluidNinja Buoyancy's waves running and hidden from every drawn surface under a
+	// simulation (else FluidNinja's own waves are in it and it changes every frame).
+	if (!Waves || !Waves->IsMirrorStill())
+	{
+		OutReason = TEXT("waves are drawn in it");
+		return false;
+	}
+	// Every body the square would serve now lies, with its reach (as the pieces under it are chosen without fnb.Capture.OnChange), inside the
+	// square the mirror was drawn over, less a texel at the edge; the near plane is where these bodies would put it, within a tolerance.
+	const double Inner = Half - Texel;
+	double Top = -TNumericLimits<double>::Max();
+	for (const FSlot& Slot : Slots)
+	{
+		const UFluidNinjaBuoyancyComponent* Component = Slot.Component.Get();
+		const UPrimitiveComponent* Primitive = Component ? Component->GetSimulatedPrimitive() : nullptr;
+		if (!Primitive || !Component->GetHull().IsValid() || Slot.bDormant)
+		{
+			continue;
+		}
+		const FBox Bounds = Primitive->Bounds.GetBox();
+		const double Margin = Settings.FootprintMarginCm + FMath::Min(Primitive->GetPhysicsLinearVelocity().Size2D() * Settings.FootprintLeadSeconds, MaxLeadCm);
+		const FVector2D BodyCentre = 0.5 * (FVector2D(Bounds.Min) + FVector2D(Bounds.Max));
+		if (FMath::Abs(BodyCentre.X - Desired.X) > Half || FMath::Abs(BodyCentre.Y - Desired.Y) > Half)
+		{
+			continue;   // beyond the square a redraw would use too: the far field either way
+		}
+		const double Reach = Primitive->Bounds.SphereRadius + Margin + MaxLeadCm + 4.0 * Texel;
+		if (FMath::Abs(BodyCentre.X - CaptureOrigin.X) + Reach > Inner || FMath::Abs(BodyCentre.Y - CaptureOrigin.Y) + Reach > Inner)
+		{
+			OutReason = TEXT("a body neared the edge");
+			return false;
+		}
+		double BodyTop = Bounds.Max.Z;
+		if (Slot.bHasWaterZ && Slot.LastWaterZ <= Bounds.Max.Z + WaterReachCm)
+		{
+			BodyTop = FMath::Max(BodyTop, static_cast<double>(Slot.LastWaterZ));
+		}
+		if (Slot.bFlat)
+		{
+			BodyTop = FMath::Max(BodyTop, static_cast<double>(Slot.FlatHeight));
+		}
+		Top = FMath::Max(Top, BodyTop);
+	}
+	if (Top > -TNumericLimits<double>::Max())
+	{
+		Top += Settings.NearPlaneAboveBodiesCm;
+		if (Top > CaptureTop + 0.5 * Settings.NearPlaneAboveBodiesCm)
+		{
+			OutReason = TEXT("a body rose");
+			return false;
+		}
+		if (Top < CaptureTop - Settings.NearPlaneAboveBodiesCm)
+		{
+			OutReason = TEXT("the bodies sank");
+			return false;
+		}
+	}
+	// The surface pieces in the square: the same ones, as visible as they were, where they were (fnb.Capture.MoveToleranceCm), unturned and unscaled.
+	const FBox2D Square(CaptureOrigin - FVector2D(Half), CaptureOrigin + FVector2D(Half));
+	const double Tolerance = FMath::Max(CaptureMoveToleranceCm, 0.f);
+	int32 Seen = 0;
+	for (const TWeakObjectPtr<UPrimitiveComponent>& Weak : SurfacePrimitives)
+	{
+		const UPrimitiveComponent* Primitive = Weak.Get();
+		if (!Primitive)
+		{
+			continue;
+		}
+		const FBox Box = Primitive->Bounds.GetBox();
+		if (!Square.Intersect(FBox2D(FVector2D(Box.Min), FVector2D(Box.Max))))
+		{
+			continue;
+		}
+		const FCapturedSurface* Was = CapturedSurfaces.FindByPredicate([Primitive](const FCapturedSurface& Shown) { return Shown.Primitive.Get() == Primitive; });
+		if (!Was)
+		{
+			OutReason = TEXT("a surface piece came into the square");
+			return false;
+		}
+		++Seen;
+		const FTransform Transform = Primitive->GetComponentTransform();
+		if (Was->bVisible != Primitive->IsVisible())
+		{
+			OutReason = TEXT("a surface piece was shown or hidden");
+			return false;
+		}
+		if (FVector::Dist(Was->Transform.GetLocation(), Transform.GetLocation()) > Tolerance || !Was->Transform.GetRotation().Equals(Transform.GetRotation(), 1e-4)
+			|| !Was->Transform.GetScale3D().Equals(Transform.GetScale3D(), 1e-4))
+		{
+			OutReason = TEXT("a surface piece moved");
+			return false;
+		}
+	}
+	if (Seen != CapturedSurfaces.Num())
+	{
+		OutReason = TEXT("a surface piece went");
+		return false;
+	}
+	return true;
 }
 
 int32 UFluidNinjaBuoyancySubsystem::GatherFootprints(const TArray<FFootprint>& Wanted, double Now)
@@ -5028,8 +5205,13 @@ void UFluidNinjaBuoyancySubsystem::TickWaves(float DeltaSeconds, bool bIdle)
 		Body.Sim = Found ? *Found : INDEX_NONE;
 	}
 
-	// The Surface Mirror, when it was drawn this frame (with the waves' height left out of it: FluidNinja's own surface W).
-	if (bCapturedThisFrame && CaptureTarget)
+	// The Surface Mirror as last drawn (with the waves' height left out of it: FluidNinja's own surface W), also between redraws
+	// (fnb.Capture.OnChange, fnb.Capture.EveryNFrames): it was drawn with the waves hidden, so it stays valid, and the hulls are rastered against
+	// the same water every frame. Without it they fell back to each body's own height on the frames between, and a hull whose cells read
+	// differently from the two flipped its pressing every other frame (B = eta + P rings as spikes). A mirror nothing refreshed for a while
+	// (no bodies near) is left out.
+	const double MirrorKeepSeconds = FMath::Max(1.0, 2.0 * FMath::Min(CaptureMaxAgeSeconds, 2.f));
+	if (CaptureTarget && CaptureResolution > 0 && CaptureTime >= 0.0 && (bCapturedThisFrame || Now - CaptureTime <= MirrorKeepSeconds))
 	{
 		Input.Mirror.Target = CaptureTarget;
 		Input.Mirror.Origin = CaptureOrigin;
@@ -5368,6 +5550,7 @@ void UFluidNinjaBuoyancySubsystem::PublishFrameStats()
 	CSV_CUSTOM_STAT(FNB, BodiesWaiting, LastGatherWaiting, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(FNB, TickMs, FrameTickMs, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(FNB, PatchMs, FramePatchMs, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(FNB, MirrorRedraws, bCapturedThisFrame ? 1 : 0, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(FNB, PreTickMs, FramePreTickMs, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(FNB, PhysicsMs, FramePhysicsMs, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(FNB, GatherPoints, LastGatherSamples, ECsvCustomStatOp::Set);

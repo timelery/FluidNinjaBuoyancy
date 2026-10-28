@@ -680,6 +680,10 @@ protected:
 	 * with fnb.Gather.FastReadback, in Tick without. */
 	void CollectReadbacks();
 	void CaptureAndCopy();
+	/** fnb.Capture.OnChange: whether the last Surface Mirror still serves the bodies a redraw at Desired would serve (they fit inside its square
+	 * with their reach, the near plane is within tolerance, the surface pieces in the square are the same and where they were, and it is
+	 * younger than fnb.Capture.MaxAgeSeconds). False sets OutReason (the status line). */
+	bool MirrorStillServes(const FVector2D& Desired, double Half, double Texel, double Now, const TCHAR*& OutReason) const;
 	int32 CopyFootprints(const TArray<FFootprint>& Wanted, double Now);
 	/** The importance scheduler and the gather dispatch: which of the bodies the capture serves are gathered this frame (their level of
 	 * detail's cadence, the per-frame budget, nearest and fastest first, never past Max Extrapolation Seconds while the budget allows),
@@ -818,6 +822,20 @@ protected:
 	double CaptureRange = 0.0;
 	double CaptureTexel = 1.0;
 	int32 CaptureResolution = 0;
+	/** When the capture was last drawn (world seconds; -1 never), and each surface piece it drew as it was then (fnb.Capture.OnChange). */
+	double CaptureTime = -1.0;
+	struct FCapturedSurface
+	{
+		TWeakObjectPtr<UPrimitiveComponent> Primitive;
+		FTransform Transform;
+		bool bVisible = true;
+	};
+	TArray<FCapturedSurface> CapturedSurfaces;
+	/** Redraws in the last whole second, the count running in this one, and why the last redraw happened (the status line). */
+	int32 CapturesLastSecond = 0;
+	int32 CapturesThisSecond = 0;
+	double NextCaptureCount = 0.0;
+	const TCHAR* LastCaptureReason = TEXT("");
 
 	// The simulation FluidNinja's material parameter collection places (one following the player, such as the river template).
 	FVector2D SimCentre = FVector2D::ZeroVector;

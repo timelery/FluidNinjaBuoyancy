@@ -13,7 +13,7 @@ FluidNinja Buoyancy is a code plugin for Unreal Engine that sits on top of Fluid
 
 ## Features
 
-- **Floats on the water you see.** Every frame the plugin takes an orthographic depth capture of the water surface: FluidNinja's river spline pieces, pool planes and Niagara water sheets, including FluidNinja's pressure waves and tile displacement. Bodies float on that.
+- **Floats on the water you see.** The plugin keeps an orthographic depth capture of the water surface, redrawn whenever it would change: FluidNinja's river spline pieces, pool planes and Niagara water sheets, including FluidNinja's pressure waves and tile displacement. Bodies float on that.
 - **Currents.** It reads the simulation's velocity buffer, so bodies drift where the dye flows.
 - **Stirs the water through FluidNinja's own tracking.** By default each body is handed to FluidNinja's tracking (the plugin turns its Generate Overlap Events on and adds the NinjaLive's tracking tag, if it uses one), and the modified FluidNinja paints its motion relative to the water, so bodies drifting with the current leave it as it is. A body can instead, or as well, write the plugin's own wakes into FluidNinja's point input (its Niagara Data Channel): bow waves, wakes and a ring when dropped.
 - **Three hull models:**

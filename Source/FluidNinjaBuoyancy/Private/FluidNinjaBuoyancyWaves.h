@@ -264,6 +264,11 @@ public:
 	 * capture (bHidden) and their own value back right after it. Materials exposing LFPhysicsWaterCapture also get 1 for this capture
 	 * alone, then their previous value back, so visual hull cutouts do not remove the water the physics samples. */
 	void SetMirrorWavesHidden(bool bHidden, const TArray<TWeakObjectPtr<UPrimitiveComponent>>& Shown);
+	/** The last Surface Mirror's drawn water holds still between frames: waves were running and every captured surface either had its waves
+	 * hidden or lies under no FluidNinja simulation (a static river piece or pool plane). False when a surface showed a simulation's waves (one
+	 * without the WaveHeightScale scalar, or a simulation FluidNinja Buoyancy's waves do not run): the mirror then changes every frame, and
+	 * fnb.Capture.OnChange redraws it every frame too. Set by SetMirrorWavesHidden(true, ...). */
+	bool IsMirrorStill() const { return bMirrorStill; }
 	/** The body's simulation's B and its own field's tile for the gather; false when it feels no waves (no own field yet, waves off). */
 	bool GetGatherSlot(int32 BodyId, FFluidNinjaWaveGatherSlot& Out) const;
 	/** The self-field atlas the gather reads B_self from (null before any body has a field). */
@@ -755,6 +760,8 @@ private:
 	 * so the floaters there feel their own waves again (an error, logged once per surface, and in the status line). */
 	int32 UnhiddenSurfaces = 0;
 	TSet<FObjectKey> WarnedUnhidden;
+	/** IsMirrorStill: the last mirror's surfaces all had their waves hidden or lie under no simulation (set when it is drawn). */
+	bool bMirrorStill = false;
 
 	// Test bench.
 	TArray<FVector4> PendingPokes;      // world x, y, head, sigma

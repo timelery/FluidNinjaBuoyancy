@@ -2707,6 +2707,7 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 	}
 	UnhiddenSurfaces = 0;
 	const bool bHideWaveHeight = IsActive() && !Parameter.IsNone();
+	bMirrorStill = bHideWaveHeight;
 	// The dynamic materials are found again every frame: FluidNinja makes new ones during play (Recollect Output Material Targets During
 	// Game Time).
 	TArray<UMaterialInterface*> Used;
@@ -2768,6 +2769,13 @@ void UFluidNinjaBuoyancyWaves::SetMirrorWavesHidden(bool bHidden, const TArray<T
 		{
 			return Sim.bActive && FMath::Abs(At.X - Sim.Centre.X) < Sim.SizeCm * 0.5 && FMath::Abs(At.Y - Sim.Centre.Y) < Sim.SizeCm * 0.5;
 		});
+		// The mirror holds still only where no simulation's waves reach it: a surface that kept its waves under any simulation (running ours
+		// or not, whose drawn surface then moves as FluidNinja's own waves do) changes from frame to frame.
+		if (!bSurfaceHidden && Sims.ContainsByPredicate([&At](const FSimState& Sim)
+			{ return FMath::Abs(At.X - Sim.Centre.X) < Sim.SizeCm * 0.5 && FMath::Abs(At.Y - Sim.Centre.Y) < Sim.SizeCm * 0.5; }))
+		{
+			bMirrorStill = false;
+		}
 		if (!bSurfaceHidden && Under)
 		{
 			++UnhiddenSurfaces;
